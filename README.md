@@ -2,6 +2,27 @@
 
 Manage multiple AI coding agents via tmux. Each agent gets its own session, working directory (git worktree for repo agents), and status in a CSV tracker. Supports `claude`, `opencode`, `cursor`, `aider`, `codex`, or any CLI.
 
+## How it works
+
+Each agent is a **tmux session** running an AI CLI (`claude`, `opencode`, etc.) inside a chosen working directory. The session name, task, status, and optional task-tracker ID live in a CSV tracker; the AI tool reads its initial instructions from a generated prompt file.
+
+**Lifecycle of a repo agent:**
+
+1. `agent-start` — interactive prompt collects task, branch, task ID, type. `repo` type creates a git worktree at `$REPO_DIR/<repo>-<slug>` on a new branch.
+2. Prompt file is written to `/tmp/agent-prompt-<session>.md` with the task description plus any lines added by the `_ext_prompt_extras` hook (e.g. task-tracker link).
+3. A fresh tmux session is created in the worktree; the AI CLI is launched with the prompt piped in. For repo agents, a second pane runs `AGENT_DEV_CMD` on an allocated port.
+4. A row is appended to `agents.csv` with status `active`.
+5. Inside the session, the agent calls `agent-update <status> "note"` when done / blocked / ready-for-review. That updates both the CSV row and `agent-log.md`.
+6. `agent-dashboard` reads the CSV, cross-references live tmux sessions, and presents a TUI for reviewing and switching.
+7. `agent-resume` scans for sessions where the AI tool stopped (e.g. shell reboot) and relaunches it using the original prompt file.
+
+**Key design choices:**
+
+- **tmux = isolation.** Each agent has its own session, shell history, and working directory. Quitting the AI CLI doesn't kill the session; `agent-resume` can relaunch later.
+- **CSV = source of truth.** Plain-text, human-editable, easy to grep/sed. No daemon, no database.
+- **Hooks, not plugins.** The core is ~800 lines of zsh. All tracker/notes integration lives in a single optional `ext.sh` with five override points. Ship your private config separately from the tool.
+- **Worktrees over branches.** Repo agents get a full checkout per task so the main working copy isn't disturbed, and multiple agents on the same repo can run in parallel without stomping each other.
+
 ## Install
 
 ```sh
