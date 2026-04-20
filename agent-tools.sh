@@ -244,7 +244,11 @@ with open('$AGENT_FILE') as f:
                     local _desc="${cu_name:-$task_id}"
                     _agent_append_row "active" "$_desc" "$task_id" "$_sess" "$(_ext_notes_ref)" "$(date +%Y-%m-%d)" "" ""
                     echo "Tracked '$_sess'"
-                    command tmux switch-client -t "$_sess" 2>/dev/null || command tmux attach -t "$_sess"
+                    printf "Switch to it? [Y/n] "
+                    read -r _ans2
+                    if [[ -z "$_ans2" || "$_ans2" == [yY]* ]]; then
+                        command tmux switch-client -t "$_sess" 2>/dev/null || command tmux attach -t "$_sess"
+                    fi
                     return 0
                 fi
             fi
