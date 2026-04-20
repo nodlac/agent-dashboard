@@ -201,6 +201,56 @@ agent-start() {
     # Normalize via extension (e.g. bare number → TECH-XXXX)
     [[ -n "$task_id" && "$task_id" != "new" ]] && task_id=$(_ext_normalize_task_id "$task_id")
 
+    # ── Existing-session short-circuit ───────────────────────────────────
+    if [[ -n "$task_id" && "$task_id" != "new" ]]; then
+        # Tracked row with this task_id?
+        local _tracked_sess=$(python3 -c "
+import csv, sys
+tid = sys.argv[1]
+with open('$AGENT_FILE') as f:
+    r = csv.reader(f); next(r, None)
+    for row in r:
+        if len(row) > 3 and row[2] == tid and row[0] not in ('done',''):
+            print(row[3]); break
+" "$task_id" 2>/dev/null)
+
+        if [[ -n "$_tracked_sess" ]]; then
+            if command tmux has-session -t "$_tracked_sess" 2>/dev/null; then
+                printf "Tracked session '%s' exists for %s. Switch? [Y/n] " "$_tracked_sess" "$task_id"
+                read -r _ans
+                if [[ -z "$_ans" || "$_ans" == [yY]* ]]; then
+                    command tmux switch-client -t "$_tracked_sess" 2>/dev/null || command tmux attach -t "$_tracked_sess"
+                    return 0
+                fi
+            else
+                printf "Tracked row '%s' exists but tmux session is gone. Resume (agent-resume)? [Y/n] " "$_tracked_sess"
+                read -r _ans
+                if [[ -z "$_ans" || "$_ans" == [yY]* ]]; then
+                    agent-resume "$_tracked_sess"
+                    return 0
+                fi
+            fi
+        else
+            # Untracked tmux session whose name contains the task_id?
+            local _tid_lc=$(echo "$task_id" | tr '[:upper:]' '[:lower:]')
+            local _untracked=$(command tmux ls -F '#S' 2>/dev/null | \
+                grep -i -F "$task_id" || command tmux ls -F '#S' 2>/dev/null | grep -i -F "$_tid_lc")
+            if [[ -n "$_untracked" ]]; then
+                local _sess=$(echo "$_untracked" | head -1)
+                printf "Found untracked session '%s' matching %s. Track it? [Y/n] " "$_sess" "$task_id"
+                read -r _ans
+                if [[ -z "$_ans" || "$_ans" == [yY]* ]]; then
+                    _ext_task_lookup "$task_id" 2>/dev/null
+                    local _desc="${cu_name:-$task_id}"
+                    _agent_append_row "active" "$_desc" "$task_id" "$_sess" "$(_ext_notes_ref)" "$(date +%Y-%m-%d)" "" ""
+                    echo "Tracked '$_sess'"
+                    command tmux switch-client -t "$_sess" 2>/dev/null || command tmux attach -t "$_sess"
+                    return 0
+                fi
+            fi
+        fi
+    fi
+
     # Look up via extension
     if [[ -n "$task_id" && "$task_id" != "new" ]]; then
         if _ext_task_lookup "$task_id"; then
