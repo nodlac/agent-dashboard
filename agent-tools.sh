@@ -844,3 +844,47 @@ agent-checkin() {
 
 # ── Aliases ──────────────────────────────────────────────────────────────
 agents() { agent-dashboard "$@"; }
+
+# ── Completion ───────────────────────────────────────────────────────────
+_agent_all_sessions() {
+    command tmux ls -F '#S' 2>/dev/null | grep "^${AGENT_SESSION_PREFIX}"
+}
+
+_agent_tracked_sessions() {
+    python3 -c "
+import csv, sys
+try:
+    with open('$AGENT_FILE') as f:
+        r = csv.reader(f)
+        header = next(r, None)
+        for row in r:
+            if len(row) > 3 and row[3]:
+                print(row[3])
+except Exception: pass
+" 2>/dev/null
+}
+
+_agent_untracked_sessions() {
+    local tracked=$(_agent_tracked_sessions)
+    local all=$(_agent_all_sessions)
+    comm -23 <(echo "$all" | sort) <(echo "$tracked" | sort)
+}
+
+_agent_track_complete() {
+    local -a sessions
+    sessions=(${(f)"$(_agent_untracked_sessions)"})
+    _describe 'untracked session' sessions
+}
+
+_agent_session_complete() {
+    local -a sessions
+    sessions=(${(f)"$(_agent_tracked_sessions)"})
+    _describe 'tracked session' sessions
+}
+
+if [[ -n "$ZSH_VERSION" ]]; then
+    autoload -Uz compinit 2>/dev/null
+    (( $+functions[compdef] )) || compinit -i 2>/dev/null
+    compdef _agent_track_complete   agent-track
+    compdef _agent_session_complete agent-resume agent-done agent-serve
+fi
