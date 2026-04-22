@@ -942,3 +942,58 @@ if [[ -n "$ZSH_VERSION" ]]; then
     compdef _agent_track_complete   agent-track
     compdef _agent_session_complete agent-resume agent-done agent-serve
 fi
+
+# ── Auto-track ───────────────────────────────────────────────────────────
+# Scan live tmux sessions with the agent prefix and insert rows for any
+# not already in agents.csv. Derives a best-guess Type from session name
+# and pane working directory. Idempotent — runs cheaply on every source.
+_agent_auto_track() {
+    [[ ! -f "$AGENT_FILE" ]] && return 0
+    command -v tmux &>/dev/null || return 0
+
+    local tracked=$(_agent_tracked_sessions)
+    local today=$(date +%Y-%m-%d)
+    local notes=$(_ext_notes_ref 2>/dev/null)
+    local added=0
+
+    local s
+    for s in $(command tmux ls -F '#S' 2>/dev/null | grep "^${AGENT_SESSION_PREFIX}"); do
+        grep -Fxq "$s" <<< "$tracked" && continue
+
+        # Best-guess type from pane cwd
+        local cwd=$(command tmux display-message -t "$s" -p '#{pane_current_path}' 2>/dev/null)
+        local type_label=""
+        if [[ -n "$cwd" && "$cwd" == "$REPO_DIR"/* ]]; then
+            local rest="${cwd#$REPO_DIR/}"
+            local repo="${rest%%/*}"
+            # Strip worktree suffix (-<slug>) if the real repo name differs
+            if [[ -d "$REPO_DIR/$repo/.git" ]]; then
+                type_label="repo:$repo"
+            else
+                # Walk up to find a tracked sibling repo
+                local base="${repo%%-*}"
+                for r in "$REPO_DIR"/*/; do
+                    local rn=$(basename "$r")
+                    if [[ -d "$r/.git" && "$repo" == "$rn"* ]]; then
+                        type_label="repo:$rn"
+                        break
+                    fi
+                done
+            fi
+        else
+            # Fall back to the prefix after z-/zz-
+            local stripped="${s#${AGENT_SESSION_PREFIX}}"
+            type_label="${stripped%%-*}"
+            [[ "$type_label" == "$stripped" ]] && type_label=""
+        fi
+
+        _agent_append_row "active" "$s" "" "$s" "$notes" "$today" "$type_label" ""
+        ((added++))
+    done
+
+    [[ $added -gt 0 ]] && echo "agent-tools: auto-tracked $added session(s)"
+}
+
+# Run at source time, but only in interactive shells so scripts / subshells
+# don't spam noise.
+[[ -o interactive ]] && _agent_auto_track 2>/dev/null
