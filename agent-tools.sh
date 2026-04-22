@@ -896,6 +896,92 @@ agent-checkin() {
     echo "Check-in complete."
 }
 
+# ── agent-restart ────────────────────────────────────────────────────────
+# Recreate a tmux session for a tracked row whose session was killed.
+# Reconstructs work_dir from type_label (repo:<name> or registered type
+# with {slug} template), rebuilds prompt file if missing, launches tool.
+agent-restart() {
+    _agent_tools_reload || { agent-restart "$@"; return; }
+    local sess="$1"
+    [[ -z "$sess" ]] && echo "Usage: agent-restart <session>" && return 1
+
+    if command tmux has-session -t "$sess" 2>/dev/null; then
+        echo "Session already alive. Use agent-resume to relaunch the tool."
+        return 1
+    fi
+
+    local row=$(python3 -c "
+import csv, sys
+with open('$AGENT_FILE') as f:
+    r = csv.reader(f); next(r, None)
+    for row in r:
+        if len(row) > 3 and row[3] == sys.argv[1]:
+            print(chr(31).join(row)); break
+" "$sess" 2>/dev/null)
+    if [[ -z "$row" ]]; then
+        echo "Session '$sess' not found in agents.csv"
+        return 1
+    fi
+
+    local IFS=$'\x1f'
+    local parts=(${(s.\x1f.)row})
+    local csv_status="${parts[1]}"
+    local csv_task="${parts[2]}"
+    local csv_taskid="${parts[3]}"
+    local csv_notes="${parts[5]}"
+    local type_label="${parts[7]}"
+
+    # Reconstruct work_dir
+    local work_dir=""
+    if [[ "$type_label" == repo:* ]]; then
+        local repo="${type_label#repo:}"
+        local type_short="${repo//./-}"
+        local prefix="${AGENT_SESSION_PREFIX}${type_short}-"
+        local slug="${sess#$prefix}"
+        work_dir="$REPO_DIR/${repo}-${slug}"
+        if [[ ! -d "$work_dir" ]]; then
+            # Worktree may live inside the main repo's .git/worktrees structure.
+            # Try the main-repo-relative path as fallback.
+            local alt="$REPO_DIR/$repo"
+            [[ -d "$alt/.git" ]] && work_dir="$alt"
+        fi
+    elif [[ -n "${_AGENT_TYPES[$type_label]}" ]]; then
+        local _tv="${_AGENT_TYPES[$type_label]}"
+        local _dir="${_tv##*:}"
+        local stripped="${sess#${AGENT_SESSION_PREFIX}${type_label}-}"
+        work_dir="${_dir//\{slug\}/$stripped}"
+    fi
+
+    if [[ -z "$work_dir" || ! -d "$work_dir" ]]; then
+        echo "Cannot resolve work dir (guess: '$work_dir'). Use: agent-restart $sess -d <path>"
+        return 1
+    fi
+
+    # Rebuild prompt file if wiped (e.g. /tmp cleared on reboot)
+    local prompt_file="/tmp/agent-prompt-${sess}.md"
+    if [[ ! -f "$prompt_file" ]]; then
+        {
+            echo "You are working on:"
+            echo ""
+            echo "$csv_task"
+            echo ""
+            _ext_prompt_extras "$csv_taskid" "$csv_notes"
+            echo ""
+            echo "When you finish or get blocked, run: agent-update <status> \"<note>\""
+        } > "$prompt_file"
+    fi
+
+    local tool="$AGENT_TOOL"
+    [[ -f "/tmp/agent-tool-${sess}" ]] && tool=$(cat "/tmp/agent-tool-${sess}")
+
+    command tmux new-session -d -s "$sess" -c "$work_dir"
+    local launch_cmd=$(_agent_tool_cmd "$tool" "$prompt_file")
+    command tmux send-keys -t "$sess" "$launch_cmd" Enter
+
+    echo "Restarted '$sess' at $work_dir"
+    command tmux switch-client -t "$sess" 2>/dev/null || command tmux attach -t "$sess"
+}
+
 # ── Aliases ──────────────────────────────────────────────────────────────
 agents() { agent-dashboard "$@"; }
 
@@ -940,7 +1026,7 @@ if [[ -n "$ZSH_VERSION" ]]; then
     autoload -Uz compinit 2>/dev/null
     (( $+functions[compdef] )) || compinit -i 2>/dev/null
     compdef _agent_track_complete   agent-track
-    compdef _agent_session_complete agent-resume agent-done agent-serve
+    compdef _agent_session_complete agent-resume agent-done agent-serve agent-restart
 fi
 
 # ── Auto-track ───────────────────────────────────────────────────────────
