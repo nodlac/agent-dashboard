@@ -11,8 +11,9 @@ import time
 import tempfile
 from datetime import datetime
 
-AGENT_FILE = os.path.expanduser(os.environ.get("AGENT_FILE", "~/.agents/agents.csv"))
-AGENT_LOG  = os.path.expanduser(os.environ.get("AGENT_LOG",  "~/.agents/agent-log.md"))
+AGENT_DIR  = os.path.expanduser(os.environ.get("AGENT_DIR",  "~/.agents"))
+AGENT_FILE = os.path.expanduser(os.environ.get("AGENT_FILE", os.path.join(AGENT_DIR, "agents.csv")))
+AGENT_LOG  = os.path.expanduser(os.environ.get("AGENT_LOG",  os.path.join(AGENT_DIR, "agent-log.md")))
 EXCLUDED   = re.compile(os.environ.get("AGENT_EXCLUDED", r'^(control-center|settings|notes)$'))
 ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*[mGKHFABCDsuJh]|\x1b\(B|\x1b=|\r')
 REFRESH_INTERVAL = 30  # seconds
