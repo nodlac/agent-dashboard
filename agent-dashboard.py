@@ -607,7 +607,18 @@ class Dashboard:
                 # Prefer tmux floating popup when inside tmux; keeps the
                 # dashboard untouched underneath. Fall back to inline run.
                 if os.environ.get("TMUX"):
-                    cmd = f"tmux display-popup -E -w 90% -h 85% \"zsh -c 'bindkey -e; source {script} && agent-start; echo; echo Press enter to close; read'\""
+                    log = "/tmp/agent-start-popup.log"
+                    inner = (
+                        f"exec > >(tee -a {log}) 2>&1; "
+                        f"echo '=== $(date) ==='; "
+                        f"source {script}; "
+                        f"echo SRC_RC=$?; "
+                        f"type agent-start >/dev/null && echo FN_OK || echo FN_MISSING; "
+                        f"agent-start; "
+                        f"echo AS_RC=$?; "
+                        f"echo; echo 'Press enter to close'; read"
+                    )
+                    cmd = f"tmux display-popup -E -w 90% -h 85% \"zsh -c '{inner}'\""
                     os.system(cmd)
                 else:
                     curses.endwin()
