@@ -603,12 +603,18 @@ class Dashboard:
                     self._refresh_pinned(enriched)
 
             elif key in (ord('n'), ord('N')):
-                curses.endwin()
                 script = os.environ.get("AGENT_TOOLS_SCRIPT", os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent-tools.sh"))
-                os.system(f"zsh -c 'bindkey -e; source {script} && agent-start'")
-                os.system("stty sane")
-                self.stdscr = curses.initscr()
-                self._init_curses()
+                # Prefer tmux floating popup when inside tmux; keeps the
+                # dashboard untouched underneath. Fall back to inline run.
+                if os.environ.get("TMUX"):
+                    cmd = f"tmux display-popup -E -w 90% -h 85% \"zsh -c 'bindkey -e; source {script} && agent-start; echo; echo Press enter to close; read'\""
+                    os.system(cmd)
+                else:
+                    curses.endwin()
+                    os.system(f"zsh -c 'bindkey -e; source {script} && agent-start'")
+                    os.system("stty sane")
+                    self.stdscr = curses.initscr()
+                    self._init_curses()
                 self._refresh_pinned(enriched)
 
             elif key in (ord('r'), ord('R')):
