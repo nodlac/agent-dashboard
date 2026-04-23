@@ -1081,5 +1081,9 @@ _agent_auto_track() {
 }
 
 # Run at source time, but only in interactive shells so scripts / subshells
-# don't spam noise.
-[[ -o interactive ]] && _agent_auto_track 2>/dev/null
+# don't spam noise. Wrapped so the source always returns 0 regardless —
+# callers rely on `source agent-tools.sh && ...` chains.
+if [[ -o interactive ]]; then
+    _agent_auto_track 2>/dev/null || true
+fi
+true
