@@ -604,28 +604,37 @@ class Dashboard:
 
             elif key in (ord('n'), ord('N')):
                 script = os.environ.get("AGENT_TOOLS_SCRIPT", os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent-tools.sh"))
-                # Prefer tmux floating popup when inside tmux; keeps the
-                # dashboard untouched underneath. Fall back to inline run.
-                if os.environ.get("TMUX"):
-                    log = "/tmp/agent-start-popup.log"
-                    inner = (
-                        f"exec > >(tee -a {log}) 2>&1; "
-                        f"echo '=== $(date) ==='; "
-                        f"source {script}; "
-                        f"echo SRC_RC=$?; "
-                        f"type agent-start >/dev/null && echo FN_OK || echo FN_MISSING; "
-                        f"agent-start; "
-                        f"echo AS_RC=$?; "
-                        f"echo; echo 'Press enter to close'; read"
-                    )
-                    cmd = f"tmux display-popup -E -w 90% -h 85% \"zsh -c '{inner}'\""
-                    os.system(cmd)
-                else:
-                    curses.endwin()
-                    os.system(f"zsh -c 'bindkey -e; source {script} && agent-start'")
-                    os.system("stty sane")
-                    self.stdscr = curses.initscr()
-                    self._init_curses()
+                log = "/tmp/agent-start-popup.log"
+                # Write runner to temp file to avoid nested-quote hell.
+                runner_body = (
+                    f"#!/usr/bin/env zsh\n"
+                    f"exec > >(tee -a {log}) 2>&1\n"
+                    f"echo \"=== $(date) ===\"\n"
+                    f"source {script}\n"
+                    f"echo SRC_RC=$?\n"
+                    f"type agent-start >/dev/null && echo FN_OK || echo FN_MISSING\n"
+                    f"agent-start\n"
+                    f"echo AS_RC=$?\n"
+                    f"echo\n"
+                    f"echo 'Press enter to close'\n"
+                    f"read\n"
+                )
+                with tempfile.NamedTemporaryFile('w', suffix='.zsh', delete=False) as tf:
+                    tf.write(runner_body)
+                    runner = tf.name
+                os.chmod(runner, 0o755)
+                try:
+                    if os.environ.get("TMUX"):
+                        os.system(f"tmux display-popup -E -w 90% -h 85% {runner}")
+                    else:
+                        curses.endwin()
+                        os.system(f"zsh {runner}")
+                        os.system("stty sane")
+                        self.stdscr = curses.initscr()
+                        self._init_curses()
+                finally:
+                    try: os.unlink(runner)
+                    except OSError: pass
                 self._refresh_pinned(enriched)
 
             elif key in (ord('r'), ord('R')):
