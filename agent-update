@@ -63,11 +63,15 @@ def main():
     header = []
     found = False
     is_focus = False
+    row_type = ''
+    row_taskid = ''
     with open(AGENT_FILE) as f:
         reader = csv.reader(f)
         header = next(reader)
         rows.append(header)
         focus_idx = header.index('Focus') if 'Focus' in header else -1
+        type_idx = header.index('Type') if 'Type' in header else -1
+        taskid_idx = header.index('TaskID') if 'TaskID' in header else -1
         for row in reader:
             if len(row) > 3 and row[3] == session:
                 found = True
@@ -75,6 +79,10 @@ def main():
                     is_focus = True
                 else:
                     row[0] = status
+                if type_idx >= 0 and len(row) > type_idx:
+                    row_type = row[type_idx]
+                if taskid_idx >= 0 and len(row) > taskid_idx:
+                    row_taskid = row[taskid_idx]
             rows.append(row)
 
     if not found:
@@ -94,6 +102,20 @@ def main():
         print(f"✓ {session} — focus mode (status unchanged, note logged)")
     else:
         print(f"✓ {session} → {status}")
+
+    # Testing-checklist hint when transitioning to review/testing.
+    # Analytics tasks are exempt — their deliverable is the analysis.
+    if status in ('review', 'testing'):
+        if row_type == 'analytics':
+            print("  Type=analytics — SKIP testing checklist (deliverable is the analysis itself).")
+        else:
+            slug = session.removeprefix('zz-').removeprefix('z-')
+            base = row_taskid if row_taskid else slug
+            target = os.path.expanduser(
+                f"~/notes/work_notes/testing-checklists/{base}-{slug}.md"
+                if row_taskid else f"~/notes/work_notes/testing-checklists/{slug}.md"
+            )
+            print(f"  Write testing checklist to: {target}")
 
 if __name__ == '__main__':
     main()
