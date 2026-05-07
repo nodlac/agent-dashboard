@@ -108,7 +108,11 @@ elif ! head -1 "$AGENT_FILE" | grep -q "^Status,"; then
 fi
 
 _sanitize_session() {
-    echo "$1" | tr ' ' '-' | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g' | sed 's/--*/-/g' | sed 's/-$//'
+    # Truncate to 60 chars so derived paths (e.g. /tmp/agent-prompt-<sess>.md)
+    # stay well under the 255-byte filename limit.
+    echo "$1" | tr ' ' '-' | tr '[:upper:]' '[:lower:]' \
+        | sed 's/[^a-z0-9_-]/-/g' | sed 's/--*/-/g' | sed 's/-$//' \
+        | cut -c1-60 | sed 's/-$//'
 }
 
 _agent_append_row() {
