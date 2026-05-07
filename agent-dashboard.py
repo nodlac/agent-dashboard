@@ -254,7 +254,9 @@ class Dashboard:
         else:  # status (default)
             enriched.sort(key=lambda a: (1 if a['_focus'] else 0, STATUS_ORDER.get(a['_ds'], 9), a.get('Session', '').lower()))
         if self.hide_done:
-            enriched = [a for a in enriched if a['_ds'] != 'done']
+            # Keep focused items visible even when done — user pinned them
+            # for a reason and should see them through.
+            enriched = [a for a in enriched if a['_ds'] != 'done' or a['_focus']]
         if self.search:
             q = self.search.lower()
             enriched = [a for a in enriched if q in a.get('Session', '').lower()
@@ -437,6 +439,14 @@ class Dashboard:
         curses.doupdate()
         curses.napms(1200)
 
+    def _status(self, msg):
+        """Paint a status message immediately (no blocking sleep) — for
+        progress updates during slow operations."""
+        h, w = self.stdscr.getmaxyx()
+        self._bar(h - 1, f' {msg}', w)
+        self.stdscr.noutrefresh()
+        curses.doupdate()
+
     def _write(self, y, x, text, attr=0):
         try:
             self.stdscr.attron(attr)
@@ -571,12 +581,16 @@ class Dashboard:
                     choice = (choice or '').strip().lower()
                     if choice in ('k', 'kill'):
                         append_log(session, 'session killed from dashboard')
-                        # Grab worktree path before killing session
+                        self._status(f"Killing '{session}'…  reading worktree path")
                         pane_path = get_pane_path(session)
+                        self._status(f"Killing '{session}'…  tmux kill-session")
                         subprocess.run(["tmux", "kill-session", "-t", session],
                                        stderr=subprocess.DEVNULL)
+                        self._status(f"Killing '{session}'…  removing worktree")
                         remove_worktree(pane_path)
+                        self._status(f"Killing '{session}'…  updating tracker")
                         remove_agent(session)
+                        self._flash(f"Killed '{session}'")
                         self._refresh_pinned(enriched)
                     elif choice in ('u', 'untrack'):
                         append_log(session, 'untracked from dashboard')
