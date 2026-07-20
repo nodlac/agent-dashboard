@@ -8,12 +8,48 @@ Auto-detects the current tmux session name.
 If no note is given on the command line, opens an nvim popup
 (via tmux display-popup) for multiline editing.
 """
-import csv, subprocess, sys, os, tempfile
+import csv, glob, subprocess, sys, os, tempfile
 from datetime import datetime
 
 AGENT_DIR  = os.environ.get("AGENT_DIR", os.path.expanduser("~/.agents"))
 AGENT_FILE = os.environ.get("AGENT_FILE", os.path.join(AGENT_DIR, "agents.csv"))
 AGENT_LOG  = os.environ.get("AGENT_LOG", os.path.join(AGENT_DIR, "agent-log.md"))
+CHECKLIST_DIR = os.path.expanduser("~/notes/work_notes/testing-checklists")
+
+
+def _norm_seg(s):
+    """Normalize a filename segment to underscore convention (TECH-4748 -> TECH_4748)."""
+    return s.replace("-", "_")
+
+
+def checklist_stem(taskid, slug):
+    """Standard testing-checklist filename stem: TECH_####_task_description
+    (falls back to the underscored slug when there's no task ID)."""
+    if taskid:
+        return f"{_norm_seg(taskid)}_{_norm_seg(slug)}"
+    return _norm_seg(slug)
+
+
+def delete_checklists(taskid, slug):
+    """Remove the task's testing checklist(s). Matches both the current
+    underscore convention and legacy hyphen names."""
+    patterns = []
+    if taskid:
+        patterns += [f"{_norm_seg(taskid)}*.md", f"{taskid}*.md"]  # new + legacy
+    else:
+        patterns += [f"{_norm_seg(slug)}.md", f"{slug}.md"]
+    removed, seen = [], set()
+    for pat in patterns:
+        for p in glob.glob(os.path.join(CHECKLIST_DIR, pat)):
+            if p in seen:
+                continue
+            seen.add(p)
+            try:
+                os.remove(p)
+                removed.append(os.path.basename(p))
+            except OSError:
+                pass
+    return removed
 
 def main():
     valid = ('done', 'blocked', 'testing', 'active', 'review')
@@ -110,12 +146,16 @@ def main():
             print("  Type=analytics — SKIP testing checklist (deliverable is the analysis itself).")
         else:
             slug = session.removeprefix('zz-').removeprefix('z-')
-            base = row_taskid if row_taskid else slug
-            target = os.path.expanduser(
-                f"~/notes/work_notes/testing-checklists/{base}-{slug}.md"
-                if row_taskid else f"~/notes/work_notes/testing-checklists/{slug}.md"
-            )
+            target = os.path.join(CHECKLIST_DIR, f"{checklist_stem(row_taskid, slug)}.md")
             print(f"  Write testing checklist to: {target}")
+            print("  Format: '- [ ]' checkboxes, each a concrete step a user can run to test the feature.")
+
+    # On completion, the checklist is no longer needed — remove it.
+    if status == 'done' and not is_focus:
+        slug = session.removeprefix('zz-').removeprefix('z-')
+        removed = delete_checklists(row_taskid, slug)
+        if removed:
+            print(f"  Deleted testing checklist: {', '.join(removed)}")
 
 if __name__ == '__main__':
     main()
