@@ -46,6 +46,10 @@ ln -sf "$SCRIPT_DIR/agent-update" "$LOCAL_BIN/agent-update"
 chmod +x "$SCRIPT_DIR/agent-update"
 info "linked agent-update"
 
+ln -sf "$SCRIPT_DIR/mr_track.py" "$LOCAL_BIN/mr"
+chmod +x "$SCRIPT_DIR/mr_track.py"
+info "linked mr"
+
 # 3. PATH
 echo ""
 echo "Checking PATH..."

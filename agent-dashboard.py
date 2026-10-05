@@ -11,6 +11,9 @@ import time
 import tempfile
 from datetime import datetime
 
+import mr_track
+from mr_views import MRView
+
 AGENT_DIR  = os.path.expanduser(os.environ.get("AGENT_DIR",  "~/.agents"))
 AGENT_FILE = os.path.expanduser(os.environ.get("AGENT_FILE", os.path.join(AGENT_DIR, "agents.csv")))
 AGENT_LOG  = os.path.expanduser(os.environ.get("AGENT_LOG",  os.path.join(AGENT_DIR, "agent-log.md")))
@@ -26,6 +29,7 @@ DIVIDER_LINE = 1
 # Column widths (minimum / fixed)
 W_STATUS  = 10
 W_CLICKUP = 11
+W_MR      = 7
 
 # Color pair indices
 C_ACTIVE   = 1
@@ -249,6 +253,9 @@ class Dashboard:
         self.sort_mode   = 'status'
         # pane_cache: {session: (lines, timestamp)}
         self.pane_cache  = {}
+        self.view        = 'agents'  # 'agents' | 'mrs' | 'board'
+        self.mrv         = MRView(self)
+        self.mr_dots     = {}
         self._init_curses()
 
     def _init_curses(self):
@@ -286,6 +293,11 @@ class Dashboard:
         self.agents = load_agents()
         self.live   = get_live_sessions()
         self.tooled = get_tool_sessions()
+        self.mr_dots = {}
+        for r in mr_track.load().values():
+            if r['TaskID'] and r['Role'] == 'author' and r['State'] != 'closed':
+                dots = mr_track.badge(r).split()[0]
+                self.mr_dots[r['TaskID']] = max(self.mr_dots.get(r['TaskID'], ''), dots, key=lambda x: x.count('●'))
         self.last_refresh = time.time()
 
     def _enrich(self):
@@ -380,7 +392,7 @@ class Dashboard:
         preview_rows = max(0, available - list_rows - sep_rows)
 
         # Proportional columns based on terminal width
-        flex = w - W_STATUS - W_CLICKUP - 5  # remaining space after fixed cols
+        flex = w - W_STATUS - W_CLICKUP - W_MR - 6  # remaining space after fixed cols
         W_SESSION = max(16, int(flex * 0.30))
         W_TASK    = max(10, int(flex * 0.50))
         W_TYPE    = max(8, flex - W_SESSION - W_TASK)
@@ -396,7 +408,7 @@ class Dashboard:
 
         # column header
         col_hdr = (f" {'ST':<{W_STATUS}} {'SESSION':<{W_SESSION}} "
-                   f"{'TASK':<{W_TASK}} {'CLICKUP':<{W_CLICKUP}} {'TYPE/AGE':<{W_TYPE}}")
+                   f"{'TASK':<{W_TASK}} {'CLICKUP':<{W_CLICKUP}} {'MR':<{W_MR}} {'TYPE/AGE':<{W_TYPE}}")
         self._write(1, 0, col_hdr[:w], curses.color_pair(C_HEADER) | curses.A_BOLD)
 
         # list rows
@@ -431,6 +443,7 @@ class Dashboard:
             line   = (f" {status:<{W_STATUS}} {a.get('Session','')[:W_SESSION]:<{W_SESSION}} "
                       f"{a.get('Task','')[:W_TASK]:<{W_TASK}} "
                       f"{a.get('ClickUp','')[:W_CLICKUP]:<{W_CLICKUP}} "
+                      f"{self.mr_dots.get(a.get('TaskID') or a.get('ClickUp', ''), ''):<{W_MR}} "
                       f"{type_age:<{W_TYPE}}")
             attr = (curses.color_pair(C_SELECTED) | curses.A_BOLD) if idx == self.selected \
                    else COLOR_MAP.get(ds, 0)
@@ -468,9 +481,9 @@ class Dashboard:
         if self._show_help:
             footer = (" j/k:nav  enter:jump  w:walkthrough  s:restart  c:cmd  K:^C  n:new  f:focus  "
                        "a:active  r/t:review  q:qa  m:deploy  h:hold  b:block  d:done  x:kill  u:undo  p:hack  "
-                       "/:search  o:sort  H:hide  PgUp/Dn:scroll  v:refresh  Q:quit")
+                       "/:search  o:sort  H:hide  PgUp/Dn:scroll  v:refresh  tab:MRs  L:task MRs  Q:quit")
         else:
-            footer = " j/k:nav  enter:jump  w:walkthrough  s:restart  c:cmd  u:undo  /:search  Q:quit  ?:help"
+            footer = " j/k:nav  enter:jump  w:walkthrough  s:restart  c:cmd  u:undo  /:search  tab:MRs  Q:quit  ?:help"
         self._bar(h - 1, footer, w)
 
         self.stdscr.noutrefresh()
@@ -516,6 +529,23 @@ class Dashboard:
         while True:
             if time.time() - self.last_refresh > REFRESH_INTERVAL:
                 self._refresh_pinned(self._enrich())
+
+            if self.view != 'agents':
+                self.mrv.mode = 'board' if self.view == 'board' else 'list'
+                self.mrv.draw()
+                try:
+                    key = self.stdscr.getch()
+                except (curses.error, KeyboardInterrupt):
+                    break
+                if key == ord('Q'):
+                    break
+                if key == ord('\t'):
+                    self.view = 'board' if self.view == 'mrs' else 'agents'
+                elif key == curses.KEY_RESIZE:
+                    self.stdscr.clear()
+                elif key != -1:
+                    self.mrv.handle(key)
+                continue
 
             enriched = self._enrich()
             self.draw(enriched)
@@ -592,6 +622,14 @@ class Dashboard:
 
             elif key == ord('?'):
                 self._show_help = not self._show_help
+
+            elif key == ord('\t'):
+                self.view = 'mrs'
+
+            elif key == ord('L'):
+                if agent and (agent.get('TaskID') or agent.get('ClickUp')):
+                    self.mrv.search = agent.get('TaskID') or agent.get('ClickUp')
+                    self.view = 'mrs'
 
             elif key == 27:  # ESC clears search
                 self.search = ''
@@ -853,8 +891,16 @@ class Dashboard:
 
 
 def main():
+    import sys
+    view = sys.argv[sys.argv.index('--view') + 1] if '--view' in sys.argv[:-1] else 'agents'
     os.system("stty sane")
-    curses.wrapper(lambda s: Dashboard(s).run())
+
+    def start(s):
+        d = Dashboard(s)
+        d.view = view
+        d.run()
+    curses.wrapper(start)
+
 
 if __name__ == '__main__':
     main()
