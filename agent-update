@@ -150,6 +150,11 @@ def main():
             args = ['release' if status == 'done' else 'clear', row_taskid]
         subprocess.run([tracker, *args], stdout=subprocess.DEVNULL)
 
+    # Put the branch's MR on the MR board; no MR for this branch → silently nothing.
+    if status == 'review' and shutil.which('mr'):
+        subprocess.Popen(['mr', 'add', *([row_taskid] if row_taskid else [])],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     # Testing-checklist hint when transitioning to review.
     # Analytics tasks are exempt — their deliverable is the analysis.
     if status == 'review':
