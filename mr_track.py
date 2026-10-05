@@ -52,8 +52,6 @@ MERGE_BADGE = {"mergeable": "✓", "ci_must_pass": "…CI", "ci_still_running": 
                "discussions_not_resolved": "💬", "need_rebase": "rebase", "blocked_status": "blocked"}
 
 
-# ── cells ────────────────────────────────────────────────────────────────────
-
 def reached(cell):
     return bool(cell) and cell != "-"
 
@@ -118,8 +116,6 @@ def task_of(*texts):
     return ""
 
 
-# ── storage ──────────────────────────────────────────────────────────────────
-
 @contextmanager
 def locked():
     os.makedirs(AGENT_DIR, exist_ok=True)
@@ -169,8 +165,6 @@ def resolve(rows, ref):
     return [r for r in rows.values() if r["MR"] == iid
             and (not repo or repo in (r["Repo"], short_repo(r["Repo"])))]
 
-
-# ── sources ──────────────────────────────────────────────────────────────────
 
 def gl(path):
     out = subprocess.run(["glab", "api", path], capture_output=True, text=True, timeout=60)
@@ -266,8 +260,6 @@ def build_updates(rows, job_re):
             ups[r["Key"]] = {"StageNote": "stale"}
     return ups
 
-
-# ── sync ─────────────────────────────────────────────────────────────────────
 
 def sync(only=None):
     """Pull every source, then apply under lock. Returns (rows, failed_repos).
@@ -406,8 +398,6 @@ def set_field(keys, field, value):
     return mutate(apply)
 
 
-# ── sprint tracker ───────────────────────────────────────────────────────────
-
 TASK_LINE = re.compile(r"^(\s*)- \[[^\]]*\]\s+\[?TECH-(\d+)\b")
 MR_LINE = "🔀 "
 
@@ -469,8 +459,6 @@ def import_notes(path=TRACKER):
                 print(f"  skip {proj}!{iid}: {e}", file=sys.stderr)
     return added
 
-
-# ── CLI ──────────────────────────────────────────────────────────────────────
 
 def fmt_row(r):
     who = "" if r["Role"] == "author" else f" [{r['Role']}]"

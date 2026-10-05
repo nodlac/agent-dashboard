@@ -12,7 +12,7 @@ CARD_H = 4
 DETAIL_H = 7
 CLICKUP_TEAM = os.environ.get("CLICKUP_TEAM_ID", "14252037")
 
-C_CARD, C_DIM, C_WARN, C_OK, C_HEAD, C_SEL, C_BAD = range(30, 37)
+C_CARD, C_DIM, C_WARN, C_HEAD, C_SEL = range(30, 35)
 COL_COLOR = {"Review": curses.COLOR_MAGENTA, "Created": curses.COLOR_WHITE, "Self-QA": curses.COLOR_BLUE,
              "QA": curses.COLOR_YELLOW, "Staging": curses.COLOR_CYAN, "Prod": curses.COLOR_GREEN}
 
@@ -29,8 +29,6 @@ class MRView:
         self.show_closed = False
         self.msg = ""
         self.syncing = None
-
-    # ── data ────────────────────────────────────────────────────────────────
 
     def reload(self):
         try:
@@ -82,16 +80,12 @@ class MRView:
         self.key = hit["Key"] if hit else ""
         return hit, pool
 
-    # ── drawing ─────────────────────────────────────────────────────────────
-
     def _colors(self):
         curses.init_pair(C_CARD, curses.COLOR_WHITE, -1)
         curses.init_pair(C_DIM, curses.COLOR_WHITE, -1)
         curses.init_pair(C_WARN, curses.COLOR_YELLOW, -1)
-        curses.init_pair(C_OK, curses.COLOR_GREEN, -1)
         curses.init_pair(C_HEAD, curses.COLOR_CYAN, -1)
         curses.init_pair(C_SEL, curses.COLOR_BLACK, curses.COLOR_CYAN)
-        curses.init_pair(C_BAD, curses.COLOR_RED, -1)
         for i, c in enumerate(BOARD):
             curses.init_pair(40 + i, COL_COLOR[c], -1)
 
@@ -184,10 +178,8 @@ class MRView:
         for i, text in enumerate(info):
             self.d._write(y + 1 + i, 1, text[:w - 2], curses.color_pair(C_CARD))
 
-    # ── keys ────────────────────────────────────────────────────────────────
-
     def handle(self, key):
-        """Returns False for keys the dashboard should handle (tab, Q)."""
+        """False when the key is not an MR-view key."""
         rows = self.visible()
         r, pool = self.selected(rows)
         i = next((n for n, x in enumerate(pool) if x["Key"] == self.key), 0)
