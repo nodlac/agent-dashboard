@@ -45,6 +45,44 @@ AGENT_PORT_RANGE_START="${AGENT_PORT_RANGE_START:-9000}"
 AGENT_PORT_RANGE_END="${AGENT_PORT_RANGE_END:-9010}"
 AGENT_DEV_CMD="${AGENT_DEV_CMD:-npm install && PORT=\$PORT npm start}"
 
+# Per-repo auto dev-server command. Echo a command (with a literal $PORT
+# placeholder, substituted later) to auto-launch a dev-server pane for that
+# repo; echo nothing to skip auto-run. Only repos listed here auto-run — every
+# other repo gets NO dev pane (their dev commands differ and aren't wired yet).
+_agent_repo_dev_cmd() {
+    case "$1" in
+        www.vidangel.com)
+            # Vite ignores the PORT env var, so pass the allocated port via --port.
+            echo 'npm install && npm run serve -- --port $PORT --host' ;;
+        *) ;;  # no auto dev server yet
+    esac
+}
+
+# True when a repo is primarily HTML/CSS (static sites, email/landing
+# templates). Such repos get the frontend-design skill wired into the agent
+# prompt. Markup+styles must be present and at least match app-code volume
+# (js/ts/jsx/tsx/vue/svelte), so framework apps with a stray .css don't match.
+_agent_repo_is_frontend() {
+    local dir="$1"
+    [[ -d "$dir" ]] || return 1
+    local counts
+    counts=$(git -C "$dir" ls-files 2>/dev/null | awk '
+        /\.(html?|css|scss|sass|less|styl)$/           { fe++ }
+        /\.(js|jsx|ts|tsx|vue|svelte|mjs|cjs|astro)$/  { app++ }
+        END { print (fe+0), (app+0) }')
+    local fe=${counts%% *} app=${counts##* }
+    [[ "${fe:-0}" -gt 0 && "${fe:-0}" -ge "${app:-0}" ]]
+}
+
+# Map a working dir (e.g. a worktree at $REPO_DIR/<repo>-<slug>) back to its
+# repo name. Name-matching $REPO_DIR/* can't work: worktrees live there too and
+# match themselves, so ask git for the main checkout instead.
+_agent_repo_from_dir() {
+    local common
+    common=$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return
+    basename "${common:h}"
+}
+
 # ── Stub hooks (defaults, overwritten by ext if present) ─────────────────
 _ext_normalize_task_id() { echo "$1"; }
 _ext_task_lookup()       { return 1; }
@@ -82,10 +120,33 @@ _ext_file=$(_agent_tools_ext_path)
 unset _ext_file
 
 # ── Tool config ──────────────────────────────────────────────────────────
+# Stable Claude conversation id per tmux session, so a restart resumes that
+# agent's own conversation — --continue can't tell apart agents sharing a cwd.
+_agent_claude_id() {
+    python3 -c 'import sys, uuid; print(uuid.uuid5(uuid.NAMESPACE_URL, "agent-tools:" + sys.argv[1]))' "$1"
+}
+
+# _agent_tool_cmd <tool> <prompt_file> [session] [continue_dir]
+# continue_dir: only pass a dir unique to this agent (a worktree); agents
+# launched before ids existed fall back to --continue there.
 _agent_tool_cmd() {
-    local tool="$1" prompt_file="$2"
+    local tool="$1" prompt_file="$2" session="$3" continue_dir="$4"
     case "$tool" in
-        claude)   echo "claude \"\$(cat ${prompt_file})\"" ;;
+        claude*)
+            local id="" prior=()
+            [[ -n "$session" ]] && id=$(_agent_claude_id "$session")
+            [[ -n "$id" ]] && prior=(~/.claude/projects/*/"$id".jsonl(N))
+            local legacy=()
+            [[ -n "$continue_dir" ]] && legacy=(~/.claude/projects/"${continue_dir//[^a-zA-Z0-9]/-}"/*.jsonl(N))
+            if (( $#prior )); then
+                echo "$tool --resume $id"
+            elif (( $#legacy )); then
+                echo "$tool --continue"
+            elif [[ -n "$id" ]]; then
+                echo "$tool --session-id $id \"\$(cat ${prompt_file})\""
+            else
+                echo "$tool \"\$(cat ${prompt_file})\""
+            fi ;;
         opencode) echo "opencode --prompt \"\$(cat ${prompt_file})\"" ;;
         cursor)   echo "cursor --cli --prompt \"\$(cat ${prompt_file})\"" ;;
         aider)    echo "aider --message \"\$(cat ${prompt_file})\"" ;;
@@ -95,16 +156,17 @@ _agent_tool_cmd() {
 }
 
 _agent_tool_processes() {
-    echo "claude|opencode|cursor|aider|codex"
+    # Claude Code retitles its process to its version (e.g. 2.1.286).
+    echo "claude|opencode|cursor|aider|codex|[0-9]+\\.[0-9]+\\.[0-9]+"
 }
 
 # ── CSV helpers ──────────────────────────────────────────────────────────
 # Ensure data dir + agents.csv exist
 mkdir -p "$AGENT_DIR" 2>/dev/null
 if [[ ! -f "$AGENT_FILE" ]]; then
-    echo "Status,Task,TaskID,Session,Notes,Started,Type,Focus" > "$AGENT_FILE"
+    echo "Status,Task,TaskID,Session,Notes,Started,Type,Focus,Hackathon" > "$AGENT_FILE"
 elif ! head -1 "$AGENT_FILE" | grep -q "^Status,"; then
-    echo "Status,Task,TaskID,Session,Notes,Started,Type,Focus" | cat - "$AGENT_FILE" > /tmp/_agents_fix.csv && mv /tmp/_agents_fix.csv "$AGENT_FILE"
+    echo "Status,Task,TaskID,Session,Notes,Started,Type,Focus,Hackathon" | cat - "$AGENT_FILE" > /tmp/_agents_fix.csv && mv /tmp/_agents_fix.csv "$AGENT_FILE"
 fi
 
 _sanitize_session() {
@@ -180,13 +242,14 @@ agent-start() {
     _agent_tools_reload || { agent-start "$@"; return; }
 
     # Parse flags
-    local _flag_task="" _flag_type="" _flag_tool="" _flag_dir=""
+    local _flag_task="" _flag_type="" _flag_tool="" _flag_dir="" _flag_notes_file=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --task) _flag_task="$2"; shift 2 ;;
             --type) _flag_type="$2"; shift 2 ;;
             --tool) _flag_tool="$2"; shift 2 ;;
             --dir)  _flag_dir="$2"; shift 2 ;;
+            --notes-file) _flag_notes_file="$2"; shift 2 ;;
             *)      shift ;;
         esac
     done
@@ -206,62 +269,44 @@ agent-start() {
     [[ -n "$task_id" && "$task_id" != "new" ]] && task_id=$(_ext_normalize_task_id "$task_id")
 
     # ── Existing-session short-circuit ───────────────────────────────────
+    # Task already has an agent → open it, no questions. Old/auto-tracked rows
+    # often lack TaskID, so fall back to the ClickUp title slug (how sessions
+    # get named), then to the task id appearing in the session name.
     if [[ -n "$task_id" && "$task_id" != "new" ]]; then
-        # Tracked row with this task_id?
-        local _tracked_sess=$(python3 -c "
+        _ext_task_lookup "$task_id" >/dev/null 2>&1
+        local _slug="" _sess=""
+        [[ -n "$cu_name" ]] && _slug=$(_sanitize_session "$cu_name")
+        _sess=$(python3 -c "
 import csv, sys
-tid = sys.argv[1]
-with open('$AGENT_FILE') as f:
-    r = csv.reader(f); next(r, None)
-    for row in r:
-        if len(row) > 3 and row[2] == tid and row[0] not in ('done',''):
-            print(row[3]); break
-" "$task_id" 2>/dev/null)
-
-        if [[ -n "$_tracked_sess" ]]; then
-            if command tmux has-session -t "$_tracked_sess" 2>/dev/null; then
-                printf "Tracked session '%s' exists for %s. Switch? [Y/n] " "$_tracked_sess" "$task_id"
-                read -r _ans
-                if [[ -z "$_ans" || "$_ans" == [yY]* ]]; then
-                    command tmux switch-client -t "$_tracked_sess" 2>/dev/null || command tmux attach -t "$_tracked_sess"
-                    return 0
-                fi
+tid, slug = sys.argv[2], sys.argv[3]
+r = csv.reader(open(sys.argv[1])); next(r, None)
+live = set(sys.argv[4].split())
+rows = [row for row in r if len(row) > 3 and row[0] and (row[0] != 'done' or row[3] in live)]
+hit = next((row for row in rows if row[2] == tid), None) or \\
+      next((row for row in rows if slug and (row[3] == slug or row[3].endswith('-' + slug))), None)
+if hit: print(hit[3])
+" "$AGENT_FILE" "$task_id" "$_slug" "$(command tmux ls -F '#S' 2>/dev/null)" 2>/dev/null)
+        if [[ -z "$_sess" ]]; then
+            local _pats=(-e "$task_id"); [[ -n "$_slug" ]] && _pats+=(-e "-$_slug")
+            _sess=$(command tmux ls -F '#S' 2>/dev/null | grep -i -F "${_pats[@]}" | head -1)
+            [[ -n "$_sess" ]] && ! _agent_has_session "$_sess" && \
+                _agent_append_row "active" "${cu_name:-$task_id}" "$task_id" "$_sess" "$(_ext_notes_ref)" "$(date +%Y-%m-%d)" "" ""
+        fi
+        if [[ -n "$_sess" ]]; then
+            _agent_update_field "$_sess" 2 "$task_id"
+            if command tmux has-session -t "$_sess" 2>/dev/null; then
+                echo "Opening existing agent '$_sess'"
+                command tmux switch-client -t "$_sess" 2>/dev/null || command tmux attach -t "$_sess"
             else
-                printf "Tracked row '%s' exists but tmux session is gone. Resume (agent-resume)? [Y/n] " "$_tracked_sess"
-                read -r _ans
-                if [[ -z "$_ans" || "$_ans" == [yY]* ]]; then
-                    agent-resume "$_tracked_sess"
-                    return 0
-                fi
+                agent-restart "$_sess"
             fi
-        else
-            # Untracked tmux session whose name contains the task_id?
-            local _tid_lc=$(echo "$task_id" | tr '[:upper:]' '[:lower:]')
-            local _untracked=$(command tmux ls -F '#S' 2>/dev/null | \
-                grep -i -F "$task_id" || command tmux ls -F '#S' 2>/dev/null | grep -i -F "$_tid_lc")
-            if [[ -n "$_untracked" ]]; then
-                local _sess=$(echo "$_untracked" | head -1)
-                printf "Found untracked session '%s' matching %s. Track it? [Y/n] " "$_sess" "$task_id"
-                read -r _ans
-                if [[ -z "$_ans" || "$_ans" == [yY]* ]]; then
-                    _ext_task_lookup "$task_id" 2>/dev/null
-                    local _desc="${cu_name:-$task_id}"
-                    _agent_append_row "active" "$_desc" "$task_id" "$_sess" "$(_ext_notes_ref)" "$(date +%Y-%m-%d)" "" ""
-                    echo "Tracked '$_sess'"
-                    printf "Switch to it? [Y/n] "
-                    read -r _ans2
-                    if [[ -z "$_ans2" || "$_ans2" == [yY]* ]]; then
-                        command tmux switch-client -t "$_sess" 2>/dev/null || command tmux attach -t "$_sess"
-                    fi
-                    return 0
-                fi
-            fi
+            return 0
         fi
     fi
 
     # Look up via extension
     if [[ -n "$task_id" && "$task_id" != "new" ]]; then
-        if _ext_task_lookup "$task_id"; then
+        if [[ -n "$cu_name" ]] || _ext_task_lookup "$task_id"; then
             echo "  Found: $cu_name"
         else
             echo "  Task $task_id not found in tracker."
@@ -352,6 +397,13 @@ with open('$AGENT_FILE') as f:
     if [[ -n "$cu_name" ]]; then
         default_session=$(_sanitize_session "$cu_name")
     fi
+    if [[ -n "$_flag_notes_file" && -s "$_flag_notes_file" ]]; then
+        default_prompt="${default_prompt}
+
+Notes from sprint tracker:
+$(cat "$_flag_notes_file")"
+        rm -f "$_flag_notes_file"
+    fi
 
     # ── Generate template ────────────────────────────────────────────────
     local tmpfile="/tmp/agent-start-$$.yaml"
@@ -363,8 +415,8 @@ with open('$AGENT_FILE') as f:
 
 branch: new
 branch_type: ${branch_type_input}
-title: ${default_session}
 task_id: ${task_id}
+title: ${default_session}
 
 --- prompt ---
 ${default_prompt}
@@ -374,8 +426,8 @@ TMPL
 # Agent Setup — :wq to launch, :cq to cancel
 # Everything below "--- prompt ---" is the agent prompt (freeform).
 
-title: ${default_session}
 task_id: ${task_id}
+title: ${default_session}
 dir: ${_flag_dir:-$(pwd)}
 
 --- prompt ---
@@ -437,24 +489,6 @@ print(f\"local P_prompt='{safe}'\")
     # ── Check for duplicate task_id ──────────────────────────────────────
     local task_id="$P_task_id"
     [[ "$task_id" == "None" ]] && task_id=""
-
-    if [[ -n "$task_id" && "$task_id" != "new" ]]; then
-        local existing_session=$(python3 -c "
-import csv, sys
-tid = sys.argv[1]
-with open('$AGENT_FILE') as f:
-    for row in csv.reader(f):
-        if len(row) > 3 and row[2] == tid and row[0] not in ('done', ''):
-            print(row[3])
-            break
-" "$task_id" 2>/dev/null)
-        if [[ -n "$existing_session" ]]; then
-            echo "WARNING: $task_id already has active agent '$existing_session'"
-            printf "Continue anyway? [y/N] "
-            read -r _confirm
-            [[ "$_confirm" != [yY] ]] && echo "Aborted." && return 0
-        fi
-    fi
 
     # ── Create task via extension ────────────────────────────────────────
     if [[ "$task_id" == "new" ]]; then
@@ -561,12 +595,13 @@ with open('$AGENT_FILE') as f:
         return 1
     fi
 
-    # ── Port allocation (repo agents) ────────────────────────────────────
-    local agent_port=""
+    # ── Port allocation (repo agents w/ a known dev command) ─────────────
+    local agent_port="" dev_template=""
     if [[ "$agent_type" == "repo" ]]; then
-        agent_port=$(_allocate_port)
-        if [[ -n "$agent_port" ]]; then
-            echo "Dev server port: $agent_port"
+        dev_template=$(_agent_repo_dev_cmd "$repo_name")
+        if [[ -n "$dev_template" ]]; then
+            agent_port=$(_allocate_port)
+            [[ -n "$agent_port" ]] && echo "Dev server port: $agent_port"
         fi
     fi
 
@@ -577,9 +612,9 @@ with open('$AGENT_FILE') as f:
 
     command tmux new-session -d -s "$session_name" -c "$work_dir"
 
-    # Dev server in background pane
-    if [[ "$agent_type" == "repo" && -n "$agent_port" ]]; then
-        local dev_cmd="${AGENT_DEV_CMD//\$PORT/$agent_port}"
+    # Dev server in background pane (only repos with a wired dev command)
+    if [[ "$agent_type" == "repo" && -n "$dev_template" && -n "$agent_port" ]]; then
+        local dev_cmd="${dev_template//\$PORT/$agent_port}"
         command tmux split-window -d -t "$session_name" -h -c "$work_dir" \
             "$dev_cmd; echo 'Dev server exited. Press enter to close.'; read"
     fi
@@ -592,6 +627,10 @@ with open('$AGENT_FILE') as f:
         echo "$P_prompt"
         echo ""
         _ext_prompt_extras "$task_id" "$notes_file"
+        if [[ "$agent_type" == "repo" ]] && _agent_repo_is_frontend "$work_dir"; then
+            echo ""
+            echo "This is an HTML/CSS repo. Use the frontend-design skill (/frontend-design) for any UI, layout, or styling work — invoke it before making visual changes."
+        fi
         [[ -n "$agent_port" ]] && echo "Dev server: http://localhost:${agent_port} (running in right pane)"
         echo ""
         echo "When you finish or get blocked, run: agent-update <status> \"<note>\""
@@ -600,7 +639,7 @@ with open('$AGENT_FILE') as f:
     # Save tool + port for resume
     echo "$tool" > "/tmp/agent-tool-${session_name}"
 
-    local launch_cmd=$(_agent_tool_cmd "$tool" "$prompt_file")
+    local launch_cmd=$(_agent_tool_cmd "$tool" "$prompt_file" "$session_name")
     command tmux send-keys -t "$session_name" "$launch_cmd" Enter
 
     echo ""
@@ -611,8 +650,82 @@ with open('$AGENT_FILE') as f:
     command tmux switch-client -t "$session_name"
 }
 
+# ── agent-review (ar) ────────────────────────────────────────────────────
+# Walk through an agent's change inside its own pane — all back-and-forth
+# happens there. No arg: pick from agents in review/blocked.
+agent-review() {
+    local rows
+    rows=$(python3 - "$AGENT_FILE" "${1:-}" <<'PY'
+import csv, sys
+path, want = sys.argv[1], sys.argv[2].lower()
+rows = list(csv.DictReader(open(path)))
+if want:
+    rows = [r for r in rows if r['Status'] != 'done' and
+            (want in r['Session'].lower() or want == (r.get('TaskID') or '').lower())]
+else:
+    rows = [r for r in rows if r['Status'] in ('review', 'blocked')]
+for r in rows:
+    print(f"{r['Session']}\t{r['Status']}\t{r.get('TaskID') or ''}\t{r['Task']}")
+PY
+)
+    [[ -z "$rows" ]] && { echo "Nothing waiting on review${1:+ matching '$1'}."; return 1; }
+    local session="$rows"
+    if (( $(wc -l <<< "$rows") > 1 )); then
+        session=$(fzf --delimiter='\t' --prompt='review> ' <<< "$rows") || return 0
+    fi
+    session="${session%%$'\t'*}"
+    command tmux has-session -t "$session" 2>/dev/null \
+        || { echo "tmux session '$session' is gone — run: agent-resume $session"; return 1; }
+
+    local walkthrough="REVIEW WALKTHROUGH — I'm here now. 1) Run the ponytail:ponytail-review skill on your full diff vs the base branch; report findings, don't fix yet. 2) Walk me through the change: the problem, what changed per file (key hunks only), why this approach. 3) NEEDS MY ATTENTION: decisions only I can make, assumptions, risky spots, anything untested, anything skipped or deviating from the ticket. 4) How to check it: branch, MR link, what's pushed, video (agent-video $session), checklist path. Keep it scannable, then wait for me. If I ask for changes: agent-update active while working, agent-update review when ready again. Never merge or deploy."
+
+    local pane=$(command tmux list-panes -t "$session" -F '#{pane_id} #{pane_current_command}' \
+        | grep -E " ($(_agent_tool_processes))\$" | head -1 | cut -d' ' -f1)
+    if [[ -n "$pane" ]]; then
+        command tmux send-keys -t "$pane" -l "$walkthrough"
+        sleep 0.3  # let the TUI take the paste before Enter, or Enter lands mid-paste
+        command tmux send-keys -t "$pane" Enter
+    else
+        pane=$(command tmux list-panes -t "$session" -F '#{pane_id}' | head -1)
+        local tool="$AGENT_TOOL"
+        [[ -f "/tmp/agent-tool-${session}" ]] && tool=$(cat "/tmp/agent-tool-${session}")
+        command tmux send-keys -t "$pane" "$tool --continue ${(q)walkthrough}" Enter
+    fi
+    command tmux select-pane -t "$pane"
+    command tmux switch-client -t "$session" 2>/dev/null || command tmux attach -t "$session"
+}
+alias ar=agent-review
+
 # ── agent-resume ─────────────────────────────────────────────────────────
 # Relaunch AI tool in sessions where it's not running
+# Rebuild /tmp/agent-prompt-<sess>.md if wiped (e.g. /tmp cleared on reboot).
+# _agent_ensure_prompt <session> [task taskid notes] — reads agents.csv when omitted.
+_agent_ensure_prompt() {
+    local sess="$1" task="$2" taskid="$3" notes="$4"
+    local prompt_file="/tmp/agent-prompt-${sess}.md"
+    [[ -f "$prompt_file" ]] && return 0
+    if [[ -z "$task" ]]; then
+        local row=$(python3 -c "
+import csv, sys
+for r in csv.DictReader(open(sys.argv[1])):
+    if r.get('Session') == sys.argv[2]:
+        print(chr(31).join([r.get('Task') or '', r.get('TaskID') or '', r.get('Notes') or ''])); break
+" "$AGENT_FILE" "$sess" 2>/dev/null)
+        [[ -z "$row" ]] && return 1
+        local parts=("${(@ps:\x1f:)row}")
+        task="${parts[1]}" taskid="${parts[2]}" notes="${parts[3]}"
+    fi
+    {
+        echo "You are working on:"
+        echo ""
+        echo "$task"
+        echo ""
+        _ext_prompt_extras "$taskid" "$notes"
+        echo ""
+        echo "When you finish or get blocked, run: agent-update <status> \"<note>\""
+    } > "$prompt_file"
+}
+
 agent-resume() {
     _agent_tools_reload || { agent-resume "$@"; return; }
     local target="$1"
@@ -637,13 +750,17 @@ agent-resume() {
     while IFS= read -r s; do
         [[ -z "$s" ]] && continue
         local prompt_file="/tmp/agent-prompt-${s}.md"
-        if [[ ! -f "$prompt_file" ]]; then
-            echo "SKIP $s — no prompt file"
-            continue
-        fi
         local tool="$AGENT_TOOL"
         [[ -f "/tmp/agent-tool-${s}" ]] && tool=$(cat "/tmp/agent-tool-${s}")
-        local launch_cmd=$(_agent_tool_cmd "$tool" "$prompt_file")
+        local pane_dir=$(command tmux display -p -t "$s" '#{pane_current_path}' 2>/dev/null) cdir=""
+        local repo=$(_agent_repo_from_dir "$pane_dir")
+        [[ -n "$repo" && "$(basename "$pane_dir")" != "$repo" ]] && cdir="$pane_dir"
+        local launch_cmd=$(_agent_tool_cmd "$tool" "$prompt_file" "$s" "$cdir")
+        [[ "$launch_cmd" == *"cat ${prompt_file}"* ]] && _agent_ensure_prompt "$s"
+        if [[ "$launch_cmd" == *"cat ${prompt_file}"* && ! -f "$prompt_file" ]]; then
+            echo "SKIP $s — no prompt file and no conversation to resume"
+            continue
+        fi
         command tmux send-keys -t "$s" "$launch_cmd" Enter
         echo "→ resumed $s"
         ((resumed++))
@@ -663,7 +780,7 @@ agent-serve() {
 import csv
 with open('$AGENT_FILE') as f:
     for row in csv.reader(f):
-        if len(row) > 6 and row[0] in ('active','review','testing') and row[6].startswith('repo:'):
+        if len(row) > 6 and row[0] in ('active','review','hold') and row[6].startswith('repo:'):
             print(row[3])
 " 2>/dev/null)
         if [[ -z "$sessions" ]]; then
@@ -699,7 +816,11 @@ with open('$AGENT_FILE') as f:
         return 1
     fi
 
-    local dev_cmd="${AGENT_DEV_CMD//\$PORT/$agent_port}"
+    # Resolve the repo's wired dev command; fall back to the default for a
+    # manual serve so this still works on repos without an auto-run entry.
+    local dev_template=$(_agent_repo_dev_cmd "$(_agent_repo_from_dir "$work_dir")")
+    [[ -z "$dev_template" ]] && dev_template="$AGENT_DEV_CMD"
+    local dev_cmd="${dev_template//\$PORT/$agent_port}"
     command tmux split-window -t "$session" -h -c "$work_dir" \
         "$dev_cmd; echo 'Dev server exited. Press enter to close.'; read"
 
@@ -737,6 +858,13 @@ agent-done() {
             echo "Session killed."
             if [[ -n "$worktree_path" ]]; then
                 _remove_worktree "$worktree_path"
+            fi
+            if [[ -d "$HOME/.agents/videos/$session_name" ]]; then
+                rm -rf "$HOME/.agents/videos/$session_name"
+                # latest.mp4 may point into the purged dir
+                [[ -L "$HOME/.agents/videos/latest.mp4" && ! -e "$HOME/.agents/videos/latest.mp4" ]] \
+                    && rm -f "$HOME/.agents/videos/latest.mp4"
+                echo "Recordings purged: videos/$session_name"
             fi
         fi
     fi
@@ -949,6 +1077,8 @@ with open('$AGENT_FILE') as f:
             local alt="$REPO_DIR/$repo"
             [[ -d "$alt/.git" ]] && work_dir="$alt"
         fi
+    elif [[ "$type_label" == auto ]]; then
+        work_dir="$REPO_DIR"
     elif [[ -n "${_AGENT_TYPES[$type_label]}" ]]; then
         local _tv="${_AGENT_TYPES[$type_label]}"
         local _dir="${_tv##*:}"
@@ -961,28 +1091,20 @@ with open('$AGENT_FILE') as f:
         return 1
     fi
 
-    # Rebuild prompt file if wiped (e.g. /tmp cleared on reboot)
     local prompt_file="/tmp/agent-prompt-${sess}.md"
-    if [[ ! -f "$prompt_file" ]]; then
-        {
-            echo "You are working on:"
-            echo ""
-            echo "$csv_task"
-            echo ""
-            _ext_prompt_extras "$csv_taskid" "$csv_notes"
-            echo ""
-            echo "When you finish or get blocked, run: agent-update <status> \"<note>\""
-        } > "$prompt_file"
-    fi
+    _agent_ensure_prompt "$sess" "$csv_task" "$csv_taskid" "$csv_notes"
 
     local tool="$AGENT_TOOL"
     [[ -f "/tmp/agent-tool-${sess}" ]] && tool=$(cat "/tmp/agent-tool-${sess}")
 
+    local cdir=""
+    [[ "$type_label" == repo:* && "$work_dir" != "$REPO_DIR/${type_label#repo:}" ]] && cdir="$work_dir"
     command tmux new-session -d -s "$sess" -c "$work_dir"
-    local launch_cmd=$(_agent_tool_cmd "$tool" "$prompt_file")
+    local launch_cmd=$(_agent_tool_cmd "$tool" "$prompt_file" "$sess" "$cdir")
     command tmux send-keys -t "$sess" "$launch_cmd" Enter
 
-    echo "Restarted '$sess' at $work_dir"
+    echo "Restarted '$sess' at $work_dir ($launch_cmd)"
+    [[ "$2" == --bg ]] && return 0
     command tmux switch-client -t "$sess" 2>/dev/null || command tmux attach -t "$sess"
 }
 
