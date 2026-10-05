@@ -37,31 +37,69 @@ C_SELECTED = 6
 C_BAR      = 7
 C_PREVIEW  = 8
 C_REVIEW   = 9
-C_TESTING  = 10
+C_HOLD     = 10
 C_FOCUS    = 11
+C_QA       = 12
+C_DEPLOY   = 13
 
-STATUS_ORDER  = {'active': 0, 'review': 1, 'testing': 2, 'blocked': 3, 'stale': 4, 'done': 5}
-STATUS_MARKER = {'active': '*', 'review': 'R', 'testing': 'T', 'blocked': '!', 'stale': '?', 'done': 'd'}
+STATUS_ORDER  = {'active': 0, 'review': 1, 'qa': 2, 'deploy': 3, 'hold': 4, 'blocked': 5, 'stale': 6, 'done': 7}
+STATUS_MARKER = {'active': '*', 'review': 'R', 'qa': 'Q', 'deploy': 'D', 'hold': '=', 'blocked': '!', 'stale': '?', 'done': 'd'}
+STATUS_ALIAS  = {'testing': 'review'}  # legacy rows still in agents.csv
 COLOR_MAP = None  # initialized after curses.start_color()
 
 
 # ── CSV helpers ──────────────────────────────────────────────────────────────
 
-def _rewrite_csv(transform):
+# Each entry: [(session, old_row)] — row-level, not whole-file, so undo
+# doesn't clobber rows agent-update wrote in the meantime.
+UNDO = []
+
+
+def _rewrite_csv(transform, record=True):
     """Read agents.csv, apply transform(rows) -> rows, write back."""
     with open(AGENT_FILE) as f:
         rows = list(csv.reader(f))
+    before = {r[3]: list(r) for r in rows[1:] if len(r) > 3}
     rows = transform(rows)
+    after = {r[3]: r for r in rows[1:] if len(r) > 3}
+    # Ignore blank padding toggle_flag adds when it creates a new column.
+    trim = lambda r: ','.join(r or []).rstrip(',')
+    changed = [(s, r) for s, r in before.items() if s not in after or trim(after[s]) != trim(r)]
+    if record and changed:
+        UNDO.append(changed)
     with open(AGENT_FILE, 'w', newline='') as f:
         csv.writer(f).writerows(rows)
+
+
+def undo_last():
+    """Restore rows from the last change. Returns affected sessions, or []."""
+    if not UNDO:
+        return []
+    changed = UNDO.pop()
+    def transform(rows):
+        width = len(rows[0]) if rows else 0
+        for session, old in changed:
+            old = old + [''] * (width - len(old))
+            for i, r in enumerate(rows):
+                if len(r) > 3 and r[3] == session:
+                    rows[i] = old
+                    break
+            else:
+                rows.append(old)
+        return rows
+    _rewrite_csv(transform, record=False)
+    return [s for s, _ in changed]
 
 
 def load_agents():
     try:
         with open(AGENT_FILE) as f:
-            return [dict(r) for r in csv.DictReader(f)]
+            rows = [dict(r) for r in csv.DictReader(f)]
     except FileNotFoundError:
         return []
+    for r in rows:
+        r['Status'] = STATUS_ALIAS.get(r.get('Status', ''), r.get('Status', ''))
+    return rows
 
 
 def update_agent_status(session, new_status):
@@ -73,18 +111,16 @@ def update_agent_status(session, new_status):
     _rewrite_csv(transform)
 
 
-def toggle_focus(session):
-    """Toggle the Focus flag for a session."""
+def toggle_flag(session, col='Focus'):
+    """Toggle a boolean column ('Focus' / 'Hackathon') for a session."""
     def transform(rows):
-        # Find Focus column index from header
         if not rows:
             return rows
         header = rows[0]
         try:
-            fi = header.index('Focus')
+            fi = header.index(col)
         except ValueError:
-            # Add Focus column
-            header.append('Focus')
+            header.append(col)
             fi = len(header) - 1
             for row in rows[1:]:
                 while len(row) <= fi:
@@ -115,6 +151,20 @@ def get_live_sessions():
         out = subprocess.check_output(["tmux", "ls"], stderr=subprocess.DEVNULL, text=True)
         return {line.split(":")[0] for line in out.splitlines()
                 if not EXCLUDED.match(line.split(":")[0])}
+    except Exception:
+        return set()
+
+
+# Claude Code retitles its process to its version (e.g. 2.1.286).
+TOOL_PROC = re.compile(r'^(claude|opencode|cursor|aider|codex|\d+\.\d+\.\d+)$')
+
+
+def get_tool_sessions():
+    """Sessions with an AI CLI still running in some pane."""
+    try:
+        out = subprocess.check_output(["tmux", "list-panes", "-a", "-F", "#S\t#{pane_current_command}"],
+                                      stderr=subprocess.DEVNULL, text=True)
+        return {sess for sess, _, cmd in (l.partition("\t") for l in out.splitlines()) if TOOL_PROC.match(cmd)}
     except Exception:
         return set()
 
@@ -215,12 +265,16 @@ class Dashboard:
         curses.init_pair(C_BAR,      curses.COLOR_BLACK,   curses.COLOR_WHITE)
         curses.init_pair(C_PREVIEW,  curses.COLOR_WHITE,   -1)
         curses.init_pair(C_REVIEW,   curses.COLOR_MAGENTA, -1)
-        curses.init_pair(C_TESTING,  curses.COLOR_YELLOW,  -1)
+        curses.init_pair(C_HOLD,     curses.COLOR_BLUE,    -1)
         curses.init_pair(C_FOCUS,    curses.COLOR_CYAN,    -1)
+        curses.init_pair(C_QA,       curses.COLOR_YELLOW,  -1)
+        curses.init_pair(C_DEPLOY,   curses.COLOR_CYAN,    -1)
         COLOR_MAP = {
             'active':  curses.color_pair(C_ACTIVE),
             'review':  curses.color_pair(C_REVIEW)  | curses.A_BOLD,
-            'testing': curses.color_pair(C_TESTING) | curses.A_BOLD,
+            'qa':      curses.color_pair(C_QA)      | curses.A_BOLD,
+            'deploy':  curses.color_pair(C_DEPLOY)  | curses.A_BOLD,
+            'hold':    curses.color_pair(C_HOLD)    | curses.A_BOLD,
             'blocked': curses.color_pair(C_BLOCKED) | curses.A_BOLD,
             'stale':   curses.color_pair(C_STALE),
             'done':    curses.color_pair(C_DONE)    | curses.A_DIM,
@@ -231,6 +285,7 @@ class Dashboard:
     def refresh_data(self):
         self.agents = load_agents()
         self.live   = get_live_sessions()
+        self.tooled = get_tool_sessions()
         self.last_refresh = time.time()
 
     def _enrich(self):
@@ -238,25 +293,26 @@ class Dashboard:
         for a in self.agents:
             status  = a.get('Status', '')
             session = a.get('Session', '')
-            ds = 'stale' if status == 'active' and session not in self.live else status
+            ds = 'stale' if status == 'active' and session not in self.tooled else status
             focus = a.get('Focus', '') == '1'
-            enriched.append({**a, '_ds': ds, '_focus': focus})
-        # Focus always sorts to top, then by chosen mode
-        # Focus sorts to bottom (out of the way), then by chosen mode
+            hack  = a.get('Hackathon', '') == '1'
+            typ = a.get('Type', '')
+            sec = 3 if focus else (2 if hack else (1 if typ == 'analytics' else (0.5 if typ == 'auto' else 0)))
+            enriched.append({**a, '_ds': ds, '_focus': focus, '_hack': hack, '_sec': sec})
+        # Sections: 0 main, 0.5 auto (agent-auto), 1 analytics, 2 hackathon, 3 focus (bottom, out of the way).
+        # Chosen sort mode applies within each section.
         if self.sort_mode == 'alpha':
-            enriched.sort(key=lambda a: (1 if a['_focus'] else 0, a.get('Session', '').lower()))
+            enriched.sort(key=lambda a: (a['_sec'], a.get('Session', '').lower()))
         elif self.sort_mode == 'age':
-            rest = [a for a in enriched if not a['_focus']]
-            focused = [a for a in enriched if a['_focus']]
-            rest.sort(key=lambda a: a.get('Started', '') or '', reverse=True)
-            focused.sort(key=lambda a: a.get('Started', '') or '', reverse=True)
-            enriched = rest + focused
+            enriched.sort(key=lambda a: a.get('Started', '') or '', reverse=True)
+            enriched.sort(key=lambda a: a['_sec'])  # stable — keeps age order within section
         else:  # status (default)
-            enriched.sort(key=lambda a: (1 if a['_focus'] else 0, STATUS_ORDER.get(a['_ds'], 9), a.get('Session', '').lower()))
+            enriched.sort(key=lambda a: (a['_sec'], STATUS_ORDER.get(a['_ds'], 9), a.get('Session', '').lower()))
         if self.hide_done:
             # Keep focused items visible even when done — user pinned them
             # for a reason and should see them through.
-            enriched = [a for a in enriched if a['_ds'] != 'done' or a['_focus']]
+            enriched = [a for a in enriched
+                        if a['_ds'] not in ('done', 'hold') or a['_focus'] or a['_hack']]
         if self.search:
             q = self.search.lower()
             enriched = [a for a in enriched if q in a.get('Session', '').lower()
@@ -314,10 +370,12 @@ class Dashboard:
         self.selected = max(0, min(self.selected, len(enriched) - 1)) if enriched else 0
 
         available    = h - HEADER_LINES - FOOTER_LINES - DIVIDER_LINE
-        # Reserve a row for focus separator if needed
-        has_focus_sep = any(a.get('Focus') == '1' for a in self.agents) and \
-                        any(a.get('Focus') != '1' for a in self.agents)
-        sep_rows     = 1 if has_focus_sep else 0
+        # Labeled separator above each section change
+        sec_labels = {0.5: ' auto ', 1: ' analytics ', 2: ' hackathon ', 3: ' focus '}
+        sep_labels = {ei: sec_labels.get(enriched[ei]['_sec'], ' ')
+                      for ei in range(1, len(enriched))
+                      if enriched[ei]['_sec'] != enriched[ei - 1]['_sec']}
+        sep_rows     = len(sep_labels)
         list_rows    = max(1, min(len(enriched), available - 3 - sep_rows))
         preview_rows = max(0, available - list_rows - sep_rows)
 
@@ -329,9 +387,11 @@ class Dashboard:
 
         # title bar
         ago    = int(time.time() - self.last_refresh)
-        hide   = "  [h: show done]" if self.hide_done else "  [h: hide done]"
+        hide   = "  [H: show done+hold]" if self.hide_done else "  [H: hide done+hold]"
         search = f"  [/{self.search}]" if self.search else ""
         sort   = f"  sort:{self.sort_mode}"
+        n_rev  = sum(a['_ds'] in ('review', 'blocked') for a in self._enrich())
+        sort  += f"  [{n_rev} need you — w: walkthrough]" if n_rev else ''
         self._bar(0, f" Agent Dashboard  {datetime.now():%Y-%m-%d %H:%M}  {ago}s ago{hide}{sort}{search}", w)
 
         # column header
@@ -345,15 +405,7 @@ class Dashboard:
         elif self.selected < self.scroll:
             self.scroll = self.selected
 
-        # Find where focused section starts (first focused item index)
-        sep_before = -1
-        for ei, a in enumerate(enriched):
-            if a.get('_focus'):
-                if ei > 0 and not enriched[ei - 1].get('_focus'):
-                    sep_before = ei
-                break
-
-        extra = 0  # extra rows consumed by separator
+        extra = 0  # extra rows consumed by separators
         for i in range(list_rows):
             idx = i + self.scroll
             if idx >= len(enriched):
@@ -362,18 +414,19 @@ class Dashboard:
             if row_y >= h - FOOTER_LINES - 1:
                 break
 
-            # Draw separator before focused section
-            if idx == sep_before and extra == 0:
-                self._write(row_y, 0, ("─" * w)[:w], curses.color_pair(C_HEADER) | curses.A_DIM)
-                extra = 1
+            label = sep_labels.get(idx)
+            if label is not None:
+                self._write(row_y, 0, ("─" * 3 + label + "─" * w)[:w],
+                            curses.color_pair(C_HEADER) | curses.A_DIM)
+                extra += 1
                 row_y += 1
                 if row_y >= h - FOOTER_LINES - 1:
                     break
 
             a      = enriched[idx]
             ds     = a['_ds']
-            focus  = '▸' if a.get('_focus') else ' '
-            status = f"{focus}{STATUS_MARKER.get(ds, ' ')} {ds}"
+            mark   = '▸' if a.get('_focus') else ('⚑' if a.get('_hack') else ' ')
+            status = f"{mark}{STATUS_MARKER.get(ds, ' ')} {ds}"
             type_age = (a.get('Type','') or age_str(a.get('Started','')))[:W_TYPE]
             line   = (f" {status:<{W_STATUS}} {a.get('Session','')[:W_SESSION]:<{W_SESSION}} "
                       f"{a.get('Task','')[:W_TASK]:<{W_TASK}} "
@@ -413,11 +466,11 @@ class Dashboard:
 
         # footer
         if self._show_help:
-            footer = (" j/k:nav  enter:jump  c:cmd  K:^C  n:new  f:focus  "
-                       "a:active  r:review  t:test  b:block  d:done  x:kill  "
-                       "/:search  o:sort  h:hide  PgUp/Dn:scroll  v:refresh  q:quit")
+            footer = (" j/k:nav  enter:jump  w:walkthrough  s:restart  c:cmd  K:^C  n:new  f:focus  "
+                       "a:active  r/t:review  q:qa  m:deploy  h:hold  b:block  d:done  x:kill  u:undo  p:hack  "
+                       "/:search  o:sort  H:hide  PgUp/Dn:scroll  v:refresh  Q:quit")
         else:
-            footer = " j/k:nav  enter:jump  c:cmd  f:focus  /:search  q:quit  ?:help"
+            footer = " j/k:nav  enter:jump  w:walkthrough  s:restart  c:cmd  u:undo  /:search  Q:quit  ?:help"
         self._bar(h - 1, footer, w)
 
         self.stdscr.noutrefresh()
@@ -481,8 +534,25 @@ class Dashboard:
             if key != ord('g'):
                 self._pending_g = False
 
-            if key in (ord('q'), ord('Q')):
+            if key == ord('Q'):
                 break
+
+            elif key == ord('q'):
+                if agent:
+                    update_agent_status(agent['Session'], 'qa')
+                    append_log(agent['Session'], 'handed to QA from dashboard')
+                    self._refresh_pinned(enriched)
+
+            elif key in (ord('u'), ord('U')):
+                sessions = undo_last()
+                if sessions:
+                    for sess in sessions:
+                        append_log(sess, 'undo from dashboard')
+                    self._refresh_pinned(enriched)
+                    self._restore_selection(self._enrich(), sessions[0])
+                    self._flash(f"Undid change to {', '.join(sessions)}")
+                else:
+                    self._flash('Nothing to undo')
 
             elif key == ord('K'):
                 if agent:
@@ -531,7 +601,7 @@ class Dashboard:
             elif key in (ord('v'), ord('V')):
                 self._refresh_pinned(enriched)
 
-            elif key in (ord('h'), ord('H')):
+            elif key == ord('H'):
                 self.hide_done = not self.hide_done
                 self.selected = 0
                 self.scroll = 0
@@ -563,9 +633,22 @@ class Dashboard:
                     self._refresh_pinned(enriched)
 
             elif key in (ord('t'), ord('T')):
+                # 't' kept as an alias for review — testing and review merged
                 if agent:
-                    update_agent_status(agent['Session'], 'testing')
-                    append_log(agent['Session'], 'marked testing from dashboard')
+                    update_agent_status(agent['Session'], 'review')
+                    append_log(agent['Session'], 'marked needs review from dashboard')
+                    self._refresh_pinned(enriched)
+
+            elif key in (ord('m'), ord('M')):
+                if agent:
+                    update_agent_status(agent['Session'], 'deploy')
+                    append_log(agent['Session'], 'marked ready for deploy/merge from dashboard')
+                    self._refresh_pinned(enriched)
+
+            elif key == ord('h'):
+                if agent:
+                    update_agent_status(agent['Session'], 'hold')
+                    append_log(agent['Session'], 'put on hold from dashboard')
                     self._refresh_pinned(enriched)
 
             elif key in (ord('b'), ord('B')):
@@ -605,9 +688,16 @@ class Dashboard:
                         if focus_count >= 5:
                             self._flash('Focus limit reached (max 5)')
                             continue
-                    toggle_focus(agent['Session'])
+                    toggle_flag(agent['Session'], 'Focus')
                     new_state = 'unfocused' if is_focused else 'focused'
                     append_log(agent['Session'], f'{new_state} from dashboard')
+                    self._refresh_pinned(enriched)
+
+            elif key in (ord('p'), ord('P')):
+                if agent:
+                    toggle_flag(agent['Session'], 'Hackathon')
+                    verb = 'removed from' if agent.get('_hack') else 'pulled into'
+                    append_log(agent['Session'], f'{verb} hackathon from dashboard')
                     self._refresh_pinned(enriched)
 
             elif key in (ord('a'), ord('A')):
@@ -618,17 +708,13 @@ class Dashboard:
 
             elif key in (ord('n'), ord('N')):
                 script = os.environ.get("AGENT_TOOLS_SCRIPT", os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent-tools.sh"))
-                log = "/tmp/agent-start-popup.log"
-                # Write runner to temp file to avoid nested-quote hell.
+                # Don't pipe output through tee — process substitution breaks
+                # nvim's TTY detection (and editing breaks). If you need to
+                # debug, run the runner manually outside the popup.
                 runner_body = (
                     f"#!/usr/bin/env zsh\n"
-                    f"exec > >(tee -a {log}) 2>&1\n"
-                    f"echo \"=== $(date) ===\"\n"
                     f"source {script}\n"
-                    f"echo SRC_RC=$?\n"
-                    f"type agent-start >/dev/null && echo FN_OK || echo FN_MISSING\n"
                     f"agent-start\n"
-                    f"echo AS_RC=$?\n"
                     f"echo\n"
                     f"echo 'Press enter to close'\n"
                     f"read\n"
@@ -637,19 +723,42 @@ class Dashboard:
                     tf.write(runner_body)
                     runner = tf.name
                 os.chmod(runner, 0o755)
+                # Tear down curses so its raw-mode terminal settings don't
+                # eat the popup's keystrokes (breaks editing in the nvim
+                # yaml template). Rebuild after the popup closes.
+                curses.endwin()
                 try:
                     if os.environ.get("TMUX"):
                         os.system(f"tmux display-popup -E -w 90% -h 85% {runner}")
                     else:
-                        curses.endwin()
                         os.system(f"zsh {runner}")
-                        os.system("stty sane")
-                        self.stdscr = curses.initscr()
-                        self._init_curses()
                 finally:
                     try: os.unlink(runner)
                     except OSError: pass
+                    os.system("stty sane")
+                    self.stdscr = curses.initscr()
+                    self._init_curses()
                 self._refresh_pinned(enriched)
+
+            elif key == ord('s'):
+                if agent:
+                    session = agent['Session']
+                    script = os.environ.get("AGENT_TOOLS_SCRIPT", os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent-tools.sh"))
+                    # Session gone → rebuild it; session alive but CLI exited → relaunch in place.
+                    cmd = 'agent-restart "$1" --bg' if session not in self.live else 'agent-resume "$1"'
+                    self._status(f"restarting {session}…")
+                    res = subprocess.run(["zsh", "-c", f"source {script} >/dev/null 2>&1; {cmd}", "_", session],
+                                         capture_output=True, text=True)
+                    lines = (res.stdout + res.stderr).strip().splitlines()
+                    self._flash(lines[-1] if lines else f"restarted {session}")
+                    self._invalidate_pane(session)
+                    self.refresh_data()
+
+            elif key in (ord('w'), ord('W')):
+                if agent:
+                    script = os.environ.get("AGENT_TOOLS_SCRIPT", os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent-tools.sh"))
+                    subprocess.run(["zsh", "-c", f"source {script}; agent-review \"$1\"", "_", agent['Session']],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
             elif key in (ord('r'), ord('R')):
                 if agent:
@@ -746,7 +855,6 @@ class Dashboard:
 def main():
     os.system("stty sane")
     curses.wrapper(lambda s: Dashboard(s).run())
-
 
 if __name__ == '__main__':
     main()

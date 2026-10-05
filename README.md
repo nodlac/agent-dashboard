@@ -44,7 +44,7 @@ Installs:
 | `agent-start`     | Interactive prompt → spawn new agent in a fresh tmux session |
 | `agent-resume`    | Relaunch the AI tool in sessions where it's stopped |
 | `agent-dashboard` | TUI for reviewing agent status (alias: `agents`) |
-| `agent-update <status> "note"` | Status update — run from inside an agent session. Statuses: `active`, `review`, `testing`, `blocked`, `done` |
+| `agent-update <status> "note"` | Status update — run from inside an agent session. Statuses: `active`, `review`, `hold`, `blocked`, `done` |
 | `agent-track <session>` | Start tracking an existing tmux session |
 | `agent-checkin`   | Walk through all active agents interactively |
 | `agent-serve`     | Add a dev-server pane to an existing repo agent |
@@ -84,9 +84,9 @@ See [`ext.example.sh`](ext.example.sh) for the hook surface: `_ext_normalize_tas
 
 ## Data format
 
-`agents.csv` columns: `Status, Task, TaskID, Session, Notes, Started, Type, Focus`.
+`agents.csv` columns: `Status, Task, TaskID, Session, Notes, Started, Type, Focus, Hackathon`.
 
-Statuses drive dashboard coloring and `agent-resume` behavior. `Focus=1` flags a session for uninterrupted work.
+Statuses drive dashboard coloring and `agent-resume` behavior. `Focus=1` flags a session for uninterrupted work. `Hackathon=1` groups a session under the dashboard's hackathon section (`p` toggles it; status updates still apply normally).
 
 ## License
 
