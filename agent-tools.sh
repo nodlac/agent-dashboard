@@ -302,6 +302,15 @@ if hit: print(hit[3])
             [[ -n "$_sess" ]] && ! _agent_has_session "$_sess" && \
                 _agent_append_row "active" "${cu_name:-$task_id}" "$task_id" "$_sess" "$(_ext_notes_ref)" "$(date +%Y-%m-%d)" "" ""
         fi
+        # Session names drift from ClickUp titles; let the user link one by
+        # hand. Picked session gets TaskID stamped, so next time it auto-matches.
+        if [[ -z "$_sess" ]] && command -v fzf >/dev/null; then
+            _sess=$( { echo "+ new agent"; command tmux ls -F '#S' 2>/dev/null; } | \
+                fzf --prompt='attach> ' --header="No agent for $task_id${cu_name:+ — $cu_name}. Pick one or create new.") || return 0
+            [[ "$_sess" == "+ new agent" ]] && _sess=""
+            [[ -n "$_sess" ]] && ! _agent_has_session "$_sess" && \
+                _agent_append_row "active" "${cu_name:-$task_id}" "$task_id" "$_sess" "$(_ext_notes_ref)" "$(date +%Y-%m-%d)" "" ""
+        fi
         if [[ -n "$_sess" ]]; then
             _agent_update_field "$_sess" 2 "$task_id"
             if command tmux has-session -t "$_sess" 2>/dev/null; then
