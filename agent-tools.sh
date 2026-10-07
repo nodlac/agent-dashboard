@@ -501,6 +501,13 @@ print(f\"local P_prompt='{safe}'\")
         echo "Prompt is required. Template saved: $tmpfile"
         return 1
     fi
+    # Every MR has to trace back to a task, so repo work can't start without one.
+    if [[ "$agent_type" == "repo" && -z "$P_task_id" ]]; then
+        echo "Repo work needs a task. File one in notes first: '- NEW_F <title>' under"
+        echo "# Current Sprint in the sprint tracker, run sprint-sync, then use its TECH id."
+        echo "Template saved: $tmpfile"
+        return 1
+    fi
     rm -f "$tmpfile"
 
     local session_slug=$(_sanitize_session "$P_title")

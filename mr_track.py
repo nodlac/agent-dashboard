@@ -464,7 +464,22 @@ def set_field(keys, field, value):
     return mutate(apply)
 
 
-TASK_LINE = re.compile(r"^(\s*)- \[[^\]]*\]\s+\[?TECH-(\d+)\b")
+TASK_LINE = re.compile(r"^(\s*)- \[([^\]]*)\]\s+\[?TECH-(\d+)\b")
+# Same ranking sprint-sync uses for # Current Sprint, so the board matches the tracker.
+MARKER_RANK = {"!": 0, ">": 1, "/": 2, " ": 3, "~": 4, "h": 5}
+
+
+def task_priorities(path=TRACKER):
+    """TECH id → (rank, line no, marker). Closed tasks rank after open ones; first mention wins."""
+    out = {}
+    try:
+        lines = open(path).readlines()
+    except OSError:
+        return out
+    for n, line in enumerate(lines):
+        if (m := TASK_LINE.match(line)) and f"TECH-{m.group(3)}" not in out:
+            out[f"TECH-{m.group(3)}"] = (MARKER_RANK.get(m.group(2), 6), n, m.group(2))
+    return out
 MR_LINE = "🔀 "
 
 
@@ -480,9 +495,9 @@ def annotate_lines(lines, by_task):
         out.append(line)
         i += 1
         m = TASK_LINE.match(line)
-        if not m or f"TECH-{m.group(2)}" not in by_task or f"TECH-{m.group(2)}" in done:
+        if not m or f"TECH-{m.group(3)}" not in by_task or f"TECH-{m.group(3)}" in done:
             continue
-        tid = f"TECH-{m.group(2)}"
+        tid = f"TECH-{m.group(3)}"
         done.add(tid)
         indent = len(m.group(1))
         child = " " * (indent + 4)
@@ -493,8 +508,53 @@ def annotate_lines(lines, by_task):
     return out
 
 
+def untasked(r):
+    """Your own open MR with no task — every MR should trace back to one."""
+    return r["Role"] == "author" and r["State"] == "opened" and not r["TaskID"]
+
+
+def link_from_notes(lines):
+    """MR links written under a TECH line claim untasked MRs. This is how an MR
+    filed via request_task() picks up its ID once sprint-sync creates the task."""
+    links, tid, depth = {}, "", 0
+    for line in lines:
+        indent = len(line) - len(line.lstrip())
+        if m := TASK_LINE.match(line):
+            tid, depth = f"TECH-{m.group(3)}", indent
+            continue
+        if line.strip() and indent <= depth:
+            tid = ""
+        for proj, iid in MR_URL_RE.findall(line):
+            if tid:
+                links[f"{proj.rsplit('/', 1)[-1]}!{iid}"] = tid
+
+    def apply(rows):
+        for k, t in links.items():
+            if k in rows and not rows[k]["TaskID"]:
+                rows[k]["TaskID"] = t
+    mutate(apply)
+
+
+def request_task(key, title, path=TRACKER):
+    """File a NEW_ line under # Current Sprint with the MR link beneath it;
+    sprint-sync creates the ClickUp task and link_from_notes() attaches it."""
+    r = load()[key]
+    kind = {"bug": "NEW_B", "fix": "NEW_B", "chore": "NEW_C"}.get(re.split(r"[/_-]", r["Branch"])[0], "NEW_F")
+    with open(path) as f:
+        lines = f.readlines()
+    at = next(i for i, l in enumerate(lines) if l.strip() == "# Current Sprint") + 1
+    lines[at:at] = [f"    - [/] {kind} {title}\n", f"        - MR {r['URL']}\n"]
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".mr-task-")
+    with os.fdopen(fd, "w") as f:
+        f.writelines(lines)
+    os.replace(tmp, path)
+    return kind
+
+
 def annotate(path=TRACKER):
     """Sync first; only MRs whose sources answered get their lines rewritten."""
+    with open(path) as f:
+        link_from_notes(f.readlines())
     rows, failed = sync()
     by_task = {}
     for r in sorted(rows.values(), key=lambda r: (r["Repo"], int(r["MR"]))):
@@ -517,7 +577,7 @@ def import_notes(path=TRACKER):
     added, tid = [], ""
     for line in open(path):
         if m := TASK_LINE.match(line):
-            tid = f"TECH-{m.group(2)}"
+            tid = f"TECH-{m.group(3)}"
         for proj, iid in MR_URL_RE.findall(line):
             try:
                 added.append(add(f"https://gitlab.com/{proj}/-/merge_requests/{iid}", tid))
@@ -529,7 +589,8 @@ def import_notes(path=TRACKER):
 def fmt_row(r):
     who = "" if r["Role"] == "author" else f" [{r['Role']}]"
     ms = MERGE_BADGE.get(r["MergeStatus"], "")
-    return (f"{short_repo(r['Repo'])+'!'+r['MR']:<14} {r['TaskID']:<10} {badge(r):<34} "
+    task = r["TaskID"] or ("⚠ no task" if untasked(r) else "")
+    return (f"{short_repo(r['Repo'])+'!'+r['MR']:<14} {task:<10} {badge(r):<34} "
             f"{ms:<9} {r['Title'][:60]}{who}")
 
 

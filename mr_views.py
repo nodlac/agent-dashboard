@@ -220,9 +220,13 @@ class MRView:
             subprocess.run(["open", f"https://app.clickup.com/t/{CLICKUP_TEAM}/{r['TaskID']}"],
                            stderr=subprocess.DEVNULL)
         elif key == ord("t") and r:
-            v = self.d._prompt(f" task for {r['Key']} [{r['TaskID']}]: ")
-            if v is not None:
-                mt.set_field([r["Key"]], "TaskID", mt.task_of(v) if v.strip() else "")
+            v = self.d._prompt(f" task for {r['Key']} — TECH id, or a title to file in notes: ")
+            v = (v or "").strip()
+            if mt.task_of(v) or v.isdigit():
+                mt.set_field([r["Key"]], "TaskID", mt.task_of(v) or f"TECH-{v}")
+            elif v:
+                kind = mt.request_task(r["Key"], v)
+                self.msg = f"filed {kind} in tracker — linked on next sprint-sync"
         elif key == ord("e") and r:
             v = self.d._prompt(f" note for {r['Key']}: ")
             if v is not None:
