@@ -1083,7 +1083,7 @@ with open('$AGENT_FILE') as f:
     fi
 
     local IFS=$'\x1f'
-    local parts=(${(s.\x1f.)row})
+    local parts=("${(@ps.\x1f.)row}")
     local csv_status="${parts[1]}"
     local csv_task="${parts[2]}"
     local csv_taskid="${parts[3]}"
