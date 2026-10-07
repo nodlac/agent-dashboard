@@ -29,7 +29,7 @@ DIVIDER_LINE = 1
 # Column widths (minimum / fixed)
 W_STATUS  = 10
 W_CLICKUP = 11
-W_MR      = 7
+W_MR      = 8
 
 # Color pair indices
 C_ACTIVE   = 1
@@ -302,11 +302,14 @@ class Dashboard:
         self.agents = load_agents()
         self.live   = get_live_sessions()
         self.tooled = get_tool_sessions()
+        self.mrs    = list(mr_track.load().values())
+        # A multi-repo agent is only as far along as its furthest-behind MR.
         self.mr_dots = {}
-        for r in mr_track.load().values():
-            if r['TaskID'] and r['Role'] == 'author' and r['State'] != 'closed':
-                dots = mr_track.badge(r).split()[0]
-                self.mr_dots[r['TaskID']] = max(self.mr_dots.get(r['TaskID'], ''), dots, key=lambda x: x.count('●'))
+        for a in self.agents:
+            mine = mr_track.for_agent(self.mrs, a.get('Session', ''), a.get('TaskID', ''))
+            if mine:
+                slow = min(mine, key=mr_track.current)
+                self.mr_dots[a.get('Session')] = mr_track.badge(slow).split()[0] + (f"{len(mine)}" if len(mine) > 1 else '')
         self.last_refresh = time.time()
 
     def _enrich(self):
@@ -452,7 +455,7 @@ class Dashboard:
             line   = (f" {status:<{W_STATUS}} {a.get('Session','')[:W_SESSION]:<{W_SESSION}} "
                       f"{a.get('Task','')[:W_TASK]:<{W_TASK}} "
                       f"{a.get('ClickUp','')[:W_CLICKUP]:<{W_CLICKUP}} "
-                      f"{self.mr_dots.get(a.get('TaskID') or a.get('ClickUp', ''), ''):<{W_MR}} "
+                      f"{self.mr_dots.get(a.get('Session'), ''):<{W_MR}} "
                       f"{type_age:<{W_TYPE}}")
             attr = (curses.color_pair(C_SELECTED) | curses.A_BOLD) if idx == self.selected \
                    else COLOR_MAP.get(ds, 0)
@@ -490,7 +493,7 @@ class Dashboard:
         if self._show_help:
             footer = (" j/k:nav  enter:jump  w:walkthrough  s:restart  c:cmd  K:^C  n:new  f:focus  "
                        "a:active  r/t:review  q:qa  m:deploy  h:hold  b:block  d:done  x:kill  u:undo  p:hack  "
-                       "/:search  o:sort  H:hide  PgUp/Dn:scroll  v:refresh  tab:MRs  L:task MRs  Q:quit")
+                       "/:search  o:sort  H:hide  PgUp/Dn:scroll  v:refresh  tab:MRs  l:open MR  L:task MRs  Q:quit")
         else:
             footer = " j/k:nav  enter:jump  w:walkthrough  s:restart  c:cmd  u:undo  /:search  tab:MRs  Q:quit  ?:help"
         self._bar(h - 1, footer, w)
@@ -634,6 +637,13 @@ class Dashboard:
 
             elif key == ord('\t'):
                 self.view = 'mrs'
+
+            elif key == ord('l'):
+                urls = [r['URL'] for r in mr_track.for_agent(self.mrs, agent['Session'], agent.get('TaskID', ''))] if agent else []
+                for u in urls:
+                    subprocess.run(['open', u], stderr=subprocess.DEVNULL)
+                if not urls:
+                    self._flash('No MR tracked for this agent')
 
             elif key == ord('L'):
                 if agent and (agent.get('TaskID') or agent.get('ClickUp')):

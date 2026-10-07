@@ -162,11 +162,41 @@ def save(rows):
     os.replace(tmp, MR_FILE)
 
 
+def related(a, b):
+    """Same parent work: one agent, one task, or one branch pushed to several repos."""
+    return a["Key"] != b["Key"] and a["Role"] == b["Role"] == "author" and (
+        (a["Agent"] and a["Agent"] == b["Agent"]) or (a["TaskID"] and a["TaskID"] == b["TaskID"])
+        or (a["Branch"] == b["Branch"] and a["Repo"] != b["Repo"]))
+
+
+def propagate(rows):
+    """Tagging one MR with a task or agent tags its whole multi-repo set. Only fills blanks."""
+    # ponytail: O(n²) per pass, fine at a few hundred MRs
+    changed = True
+    while changed:
+        changed = False
+        for a in rows.values():
+            for b in rows.values():
+                for f in ("TaskID", "Agent"):
+                    if a[f] and not b[f] and related(a, b):
+                        b[f], changed = a[f], True
+
+
+def group(rows, r):
+    return [r] + [x for x in rows if related(r, x)]
+
+
+def for_agent(rows, session, task=""):
+    return [r for r in rows if r["Role"] == "author" and r["State"] != "closed"
+            and (r["Agent"] == session or (task and r["TaskID"] == task))]
+
+
 def mutate(fn):
     """Locked read-modify-write; fn(rows) edits in place."""
     with locked():
         rows = load()
         fn(rows)
+        propagate(rows)
         save(rows)
         return rows
 
@@ -369,13 +399,13 @@ def last_sync_age():
         return float("inf")
 
 
-def add(ref=None, task=""):
+def add(ref=None, task="", agent="", cwd=None):
     """Track an MR by URL, or the current branch's MR."""
     if ref and (m := MR_URL_RE.search(ref)):
         data = gl(f"projects/{quote(m.group(1), safe='')}/merge_requests/{m.group(2)}")
     else:
         args = ["glab", "mr", "view", "-F", "json"] + ([ref] if ref else [])
-        out = subprocess.run(args, capture_output=True, text=True, timeout=60)
+        out = subprocess.run(args, capture_output=True, text=True, timeout=60, cwd=cwd)
         if out.returncode:
             raise RuntimeError(out.stderr.strip() or "no MR for this branch")
         data = json.loads(out.stdout)
@@ -386,12 +416,28 @@ def add(ref=None, task=""):
         r = rows.setdefault(f["Key"], {**{x: "" for x in FIELDS}, "Key": f["Key"]})
         r.update({x: v for x, v in f.items() if not x.startswith("_")})
         r["TaskID"] = task or r["TaskID"] or f["_task"]
+        r["Agent"] = agent or r["Agent"]
         if role == "author":
             synced_set(r, "Created", f["_created"])
         if f["_merged"]:
             synced_set(r, "Merged", f["_merged"])
     mutate(apply)
     return f["Key"]
+
+
+def add_here(task="", agent=""):
+    """MRs for the current repo's branch, or for every repo directly under a
+    multi-repo working dir. Repos without an MR are skipped."""
+    here = os.getcwd()
+    dirs = [here] if os.path.exists(os.path.join(here, ".git")) else \
+        sorted(d for d in glob(os.path.join(here, "*")) if os.path.exists(os.path.join(d, ".git")))
+    keys = []
+    for d in dirs:
+        try:
+            keys.append(add(None, task, agent, cwd=d))
+        except Exception:
+            pass
+    return keys
 
 
 def set_stage(keys, stage, mode="toggle"):
