@@ -134,6 +134,9 @@ _agent_tool_cmd() {
     local tool="$1" prompt_file="$2" session="$3" continue_dir="$4"
     case "$tool" in
         claude*)
+            # Analytics agents write no app code; ponytail's injected rules are pure token cost there.
+            # \$PWD is escaped so it resolves in the agent's pane, not the launcher's shell.
+            tool="[[ \$PWD == \$HOME/reporting/_agents/* ]] && export PONYTAIL_DEFAULT_MODE=off; $tool"
             local id="" prior=()
             [[ -n "$session" ]] && id=$(_agent_claude_id "$session")
             [[ -n "$id" ]] && prior=(~/.claude/projects/*/"$id".jsonl(N))
