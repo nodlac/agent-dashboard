@@ -48,17 +48,17 @@ Installs:
 | `agent-track <session>` | Start tracking an existing tmux session |
 | `agent-checkin`   | Walk through all active agents interactively |
 | `agent-serve`     | Add a dev-server pane to an existing repo agent |
-| `mr`              | MR board (`mr help` for the CLI: `sync`, `add`, `set`, `ls`, `badge`, `annotate`) |
+| `mr`              | MR list (`mr help` for the CLI: `sync`, `add`, `set`, `ls`, `badge`, `annotate`) |
 
 ## MR tracker
 
-Tracks merge requests through **Created → Self-QA → QA → Staging → Prod → Merged**, in any order.
+Tracks merge requests through **Created → Self-QA → Staging → QA → Prod → Merged** for tardis repos (backend, www, pier), and **Created → Self-QA → Staging → Merged → QA → Prod** for build repos (android, apple), in any order.
 
 - `mr sync` pulls every open MR you authored, are assigned, or review (`glab api`). Staging/Prod come from
   `tardis/{staging,production}/state` commit messages (backend, www, pier); android counts a successful
   `deploy_*` job on the MR head as a staging build. Self-QA and QA are set by hand.
 - Hand-set stages (`date*`, or `-` for cleared) always win over sync.
-- Dashboard: `tab` cycles agents → MR list → board; `L` shows the selected agent's MRs; agent rows get an `MR` dots column.
+- Dashboard: `tab` toggles agents ↔ MR list; `L` shows the selected agent's MRs; agent rows get an `MR` dots column.
 - `mr annotate` (run by sprint-sync) syncs, then writes a `🔀` line under each task in the sprint tracker,
   skipping tasks whose source failed.
 - Data: `$AGENT_DIR/mrs.csv`. Auto-sync: launchd `com.medina.mr-sync` every 10 min (not installed by `install.sh`).

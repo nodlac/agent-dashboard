@@ -1,4 +1,4 @@
-"""MR list + kanban views for agent-dashboard. Data and sync live in mr_track."""
+"""MR list view for agent-dashboard. Data and sync live in mr_track."""
 import curses
 import os
 import subprocess
@@ -6,27 +6,35 @@ import threading
 
 import mr_track as mt
 
-BOARD = ["Review", "Created", "Self-QA", "QA", "Staging", "Prod"]
+# (key, reverse). ISO timestamps sort as strings; blanks sink to the bottom.
+SORTS = {
+    "activity": (lambda r: r["Activity"], True),
+    "age": (lambda r: r["Created"] or "~", False),
+    "priority": (lambda r: r["_prio"][:2], False),
+    "repo": (lambda r: (r["Repo"], int(r["MR"])), False),
+}
+NO_PRIO = (7, 0, "")
+BOARD = ["Review", "Created", "Self-QA", "Staging", "Merged", "QA", "Prod"]
 AUTO_SYNC = 600  # seconds
-CARD_H = 4
 DETAIL_H = 7
 CLICKUP_TEAM = os.environ.get("CLICKUP_TEAM_ID", "14252037")
 
 C_CARD, C_DIM, C_WARN, C_HEAD, C_SEL = range(30, 35)
 COL_COLOR = {"Review": curses.COLOR_MAGENTA, "Created": curses.COLOR_WHITE, "Self-QA": curses.COLOR_BLUE,
-             "QA": curses.COLOR_YELLOW, "Staging": curses.COLOR_CYAN, "Prod": curses.COLOR_GREEN}
+             "QA": curses.COLOR_YELLOW, "Staging": curses.COLOR_CYAN, "Merged": curses.COLOR_RED,
+             "Prod": curses.COLOR_GREEN}
 
 
 class MRView:
     def __init__(self, dash):
         self.d = dash
-        self.mode = "board"  # 'list' | 'board'
         self.rows, self.mtime = {}, 0
+        self.prio, self.prio_mtime = {}, 0
         self.key = ""
-        self.col = 1
         self.scroll = 0
         self.search = ""
         self.show_closed = False
+        self.sort = "activity"
         self.msg = ""
         self.syncing = None
 
@@ -37,6 +45,12 @@ class MRView:
             m = 0
         if m != self.mtime:
             self.rows, self.mtime = mt.load(), m
+        try:
+            pm = os.path.getmtime(mt.TRACKER)
+        except OSError:
+            pm = 0
+        if pm != self.prio_mtime:
+            self.prio, self.prio_mtime = mt.task_priorities(), pm
 
     def sync(self, force=False):
         if self.syncing and self.syncing.is_alive():
@@ -56,29 +70,22 @@ class MRView:
         self.syncing.start()
 
     def visible(self):
-        rows = list(self.rows.values())
+        rows = [{**r, "_prio": self.prio.get(r["TaskID"], NO_PRIO)} for r in self.rows.values()]
         if not self.show_closed:
-            rows = [r for r in rows if r["State"] == "opened"
-                    or (r["State"] == "merged" and r["Role"] == "author" and not mt.reached(r["Prod"]))]
+            rows = [r for r in rows if mt.column(r)]
         if self.search:
             q = self.search.lower()
             rows = [r for r in rows if q in " ".join((r["Key"], r["TaskID"], r["Title"], r["Branch"])).lower()]
         order = {c: i for i, c in enumerate(BOARD)}
-        return sorted(rows, key=lambda r: (order.get(mt.column(r), 99), -mt.current(r), r["Repo"], int(r["MR"])))
-
-    def columns(self, rows):
-        cols = {c: [] for c in BOARD}
-        for r in rows:
-            if (c := mt.column(r)) in cols:
-                cols[c].append(r)
-        return cols
+        key, rev = SORTS[self.sort]
+        rows.sort(key=key, reverse=rev)
+        return sorted(rows, key=lambda r: order.get(mt.column(r), 99))  # stable: sort holds within each column
 
     def selected(self, rows):
-        """Selected row, keeping self.key/self.col consistent with what's on screen."""
-        pool = self.columns(rows)[BOARD[self.col]] if self.mode == "board" else rows
-        hit = next((r for r in pool if r["Key"] == self.key), None) or (pool[0] if pool else None)
+        """Selected row, keeping self.key consistent with what's on screen."""
+        hit = next((r for r in rows if r["Key"] == self.key), None) or (rows[0] if rows else None)
         self.key = hit["Key"] if hit else ""
-        return hit, pool
+        return hit
 
     def _colors(self):
         curses.init_pair(C_CARD, curses.COLOR_WHITE, -1)
@@ -97,56 +104,22 @@ class MRView:
         h, w = d.stdscr.getmaxyx()
         d.stdscr.erase()
         rows = self.visible()
-        sel, _ = self.selected(rows)
-        title = "MR Board" if self.mode == "board" else "MR List"
+        sel = self.selected(rows)
+        title = f"MR List  sort:{self.sort}"
         age = mt.last_sync_age()
         ago = "never" if age == float("inf") else f"{int(age // 60)}m ago"
         extra = f"  [/{self.search}]" if self.search else ""
-        d._bar(0, f" {title}  {len(rows)} MRs  synced {ago}  {self.msg}{extra}", w)
+        n_open = sum(map(mt.untasked, rows))
+        todo = f"  [{n_open} need a task — t]" if n_open else ""
+        d._bar(0, f" {title}  {len(rows)} MRs{todo}  synced {ago}  {self.msg}{extra}", w)
         body_h = h - 2 - (DETAIL_H if h > 24 else 0)
-        if self.mode == "board":
-            self._draw_board(rows, 1, body_h, w)
-        else:
-            self._draw_list(rows, 1, body_h, w)
+        self._draw_list(rows, 1, body_h, w)
         if h > 24:
             self._draw_detail(sel, 1 + body_h, w)
-        d._bar(h - 1, " tab:view  hjkl:nav  1-6:stage  >/<:advance/undo  s:sync  o:open  c:clickup  "
-                      "t:task  e:note  n:add  enter:agent  H:closed  /:search  Q:quit", w)
+        d._bar(h - 1, " tab:agents  jk:nav  1-6:stage  >/<:advance/undo  s:sync  o:open  c:clickup  "
+                      "O:sort  t:task  e:note  n:add  a:agent  x:reset  enter:agent  H:closed  /:search  Q:quit", w)
         d.stdscr.noutrefresh()
         curses.doupdate()
-
-    def _draw_board(self, rows, y0, body_h, w):
-        cols = self.columns(rows)
-        narrow = w // len(BOARD) < 20
-        shown = [self.col] if narrow else range(len(BOARD))
-        cw = w if narrow else w // len(BOARD)
-        for slot, ci in enumerate(shown):
-            name, x = BOARD[ci], slot * cw
-            cards = cols[name]
-            head = f" {'◀ ' if narrow else ''}{name} ({len(cards)}){' ▶' if narrow else ''}"
-            hattr = curses.color_pair(40 + ci) | curses.A_BOLD | (curses.A_UNDERLINE if ci == self.col else 0)
-            self.d._write(y0, x, head[:cw - 1].ljust(cw - 1), hattr)
-            per = max(1, (body_h - 1) // CARD_H)
-            idx = next((i for i, r in enumerate(cards) if r["Key"] == self.key), 0) if ci == self.col else 0
-            top = max(0, idx - per + 1)
-            for n, r in enumerate(cards[top:top + per]):
-                self._card(r, y0 + 1 + n * CARD_H, x, cw - 1, ci == self.col and r["Key"] == self.key)
-            if len(cards) > top + per:
-                self.d._write(y0 + body_h - 1, x, f" +{len(cards) - top - per} more"[:cw - 1],
-                              curses.color_pair(C_DIM) | curses.A_DIM)
-
-    def _card(self, r, y, x, cw, sel):
-        base = curses.color_pair(C_SEL) if sel else curses.color_pair(C_CARD)
-        ms = mt.MERGE_BADGE.get(r["MergeStatus"], "")
-        who = f"@{r['Role']}" if r["Role"] != "author" else ""
-        flags = " ".join(filter(None, [ms, r["StageNote"] if mt.column(r) == "Staging" else "",
-                                       *(f"⚠{g}" for g in mt.gaps(r)), who]))
-        lines = [f"{mt.short_repo(r['Repo'])}!{r['MR']} {r['TaskID']}", r["Title"], flags]
-        for i, text in enumerate(lines):
-            attr = base | (curses.A_BOLD if i == 0 else 0)
-            if not sel and i == 2 and ("✗" in flags or "⚠" in flags or "stale" in flags):
-                attr = curses.color_pair(C_WARN)
-            self.d._write(y + i, x, (" " + text)[:cw].ljust(cw), attr)
 
     def _draw_list(self, rows, y0, body_h, w):
         self.d._write(y0, 0, f" {'MR':<15}{'TASK':<11}{'STATUS':<34}{'MERGE':<10}TITLE"[:w],
@@ -183,35 +156,25 @@ class MRView:
     def handle(self, key):
         """False when the key is not an MR-view key."""
         rows = self.visible()
-        r, pool = self.selected(rows)
-        i = next((n for n, x in enumerate(pool) if x["Key"] == self.key), 0)
+        r = self.selected(rows)
+        i = next((n for n, x in enumerate(rows) if x["Key"] == self.key), 0)
 
         def move(n):
-            if pool:
-                self.key = pool[max(0, min(len(pool) - 1, i + n))]["Key"]
-
-        def shift_col(n):
-            self.col = max(0, min(len(BOARD) - 1, self.col + n))
-            self.key = ""
+            if rows:
+                self.key = rows[max(0, min(len(rows) - 1, i + n))]["Key"]
 
         if key in (curses.KEY_DOWN, ord("j")):
             move(1)
         elif key in (curses.KEY_UP, ord("k")):
             move(-1)
-        elif key in (curses.KEY_LEFT, ord("h")) and self.mode == "board":
-            shift_col(-1)
-        elif key in (curses.KEY_RIGHT, ord("l")) and self.mode == "board":
-            shift_col(1)
         elif ord("1") <= key <= ord("6") and r:
             mt.set_stage([r["Key"]], mt.STAGES[key - ord("1")])
         elif key == ord(">") and r:
-            nxt = next((s for s in mt.STAGES[mt.current(r) + 1:] if s != "Merged"), None)
+            nxt = next((s for s in mt.order(r)[mt.current(r) + 1:] if s != "Merged"), None)
             if nxt:
                 mt.set_stage([r["Key"]], nxt, "set")
-                self._follow(r["Key"])
         elif key == ord("<") and r and mt.current(r) > 0:
-            mt.set_stage([r["Key"]], mt.STAGES[mt.current(r)], "clear")
-            self._follow(r["Key"])
+            mt.set_stage([r["Key"]], mt.at(r), "clear")
         elif key in (ord("s"), ord("S")):
             self.sync(force=True)
         elif key == ord("o") and r:
@@ -236,9 +199,12 @@ class MRView:
             if v:
                 try:
                     self.key = mt.add(v.strip())
-                    self._follow(self.key)
                 except Exception as e:
                     self.msg = f"add failed: {str(e)[:60]}"
+        elif key == ord("O"):
+            modes = list(SORTS)
+            self.sort = modes[(modes.index(self.sort) + 1) % len(modes)]
+            self.key = ""
         elif key == ord("H"):
             self.show_closed = not self.show_closed
         elif key == ord("/"):
@@ -248,19 +214,27 @@ class MRView:
         elif key == 27:
             self.search = ""
         elif key in (curses.KEY_ENTER, ord("\n"), ord("\r")) and r:
-            self.d.search = r["TaskID"] or r["Branch"]
-            self.d.view = "agents"
-            self.d.selected = 0
+            self.d.search = ""
+            rows_a = self.d._enrich()
+            hit = next((n for n, a in enumerate(rows_a) if r in mt.for_agent([r], a["Session"], a.get("TaskID", ""))), None)
+            if hit is None:
+                self.msg = f"no agent for {r['TaskID'] or r['Key']}"
+            elif rows_a[hit]["Session"] in self.d.live:
+                subprocess.run(["tmux", "switch-client", "-t", rows_a[hit]["Session"]], stderr=subprocess.DEVNULL)
+            else:
+                self.d.view, self.d.selected = "agents", hit
+                self.d._flash(f"{rows_a[hit]['Session']} isn't running — s restarts it")
+        elif key == ord("a") and r:
+            v = self.d._prompt(f" agent session for {r['Key']} (+ related MRs) [{r['Agent']}]: ")
+            if v is not None:
+                mt.set_field([r["Key"]], "Agent", v.strip())
+        elif key == ord("x") and r:
+            for s in mt.STAGES:
+                if s != "Created" and (r[s] == "-" or r[s].endswith("*")):
+                    mt.set_stage([r["Key"]], s, "auto")
+            self.sync(force=True)
+            self.msg = f"{r['Key']}: hand-set stages reset, syncing"
         else:
             return False
         self.mtime = 0  # writes above must show up on the next frame
         return True
-
-    def _follow(self, key):
-        """Board selection tracks a card that changed column."""
-        self.mtime = 0
-        self.reload()
-        r = self.rows.get(key)
-        if r and mt.column(r) in BOARD:
-            self.col = BOARD.index(mt.column(r))
-            self.key = key

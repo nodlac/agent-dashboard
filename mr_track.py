@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-mr — track merge requests through Created → Self-QA → QA → Staging → Prod → Merged.
+mr — track merge requests from Created to Prod. Order differs by repo: see order().
 
-  mr                         open the dashboard on the MR board
+  mr                         open the dashboard on the MR list
   mr sync                    pull from GitLab + tardis/CI
-  mr add [url|branch]        track an MR (default: current branch)
+  mr add [url|branch] [TECH-1234] [--agent S]
+                             track an MR (default: current branch, or every repo under a multi-repo dir)
   mr set <ref> <stage> [--clear|--auto]
-                             ref = TECH-1234 | repo!iid | iid; stage = created selfqa qa staging prod merged
-  mr task <ref> TECH-1234    attach an MR to a task
+                             ref = TECH-1234 | repo!iid | iid; stage = created selfqa staging qa prod merged
+  mr task <ref> TECH-1234    attach an MR (and its related MRs) to a task
+  mr link <ref> <session>    attach an MR (and its related MRs) to an agent
   mr ls [--all] [--json]     list
   mr badge TECH-1234         one-line status for other tools
   mr annotate [file]         sync, then write 🔀 lines into the sprint tracker
@@ -20,7 +22,7 @@ Sync only fills empty cells, so hand-set values always win.
 import csv, difflib, fcntl, json, os, re, subprocess, sys, tempfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from glob import glob
 from urllib.parse import quote
 
@@ -246,6 +248,7 @@ def from_api(m, role):
         "Title": m["title"], "HeadSHA": m["sha"] or "", "Target": m["target_branch"],
         "MergeSHA": m.get("merge_commit_sha") or m.get("squash_commit_sha") or "",
         "MergeStatus": m.get("detailed_merge_status") or "", "URL": m["web_url"],
+        "Activity": m["updated_at"][:16],
         "_created": m["created_at"][:10], "_merged": (m.get("merged_at") or "")[:10],
         "_task": task_of(m["source_branch"], m["title"]),
     }
@@ -608,38 +611,75 @@ def selftest():
     assert task_of("chore/tech_5311-x") == "TECH-5311"
     r = {s: "" for s in STAGES} | {"Role": "author", "State": "opened", "StageNote": ""}
     assert not gaps({**r, "Prod": "x", "State": "merged"})
+    assert ago(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")) == "0h" and ago("") == ""
     assert synced_set(r, "Created", "2026-10-01") and r["Created"] == "2026-10-01"
     r["QA"] = "-"
     assert not synced_set(r, "QA", "2026-10-02") and r["QA"] == "-"
     r["Prod"] = "2026-10-03"
-    assert current(r) == 4 and gaps(r) == ["Self-QA", "QA"] and column(r) == "Prod"
+    assert current(r) == 5 and gaps(r) == ["Self-QA", "QA"] and column(r) == "Prod"
     toggle(r, "SelfQA")
     assert r["SelfQA"].endswith("*") and gaps(r) == ["QA"]
     toggle(r, "SelfQA")
     assert r["SelfQA"] == "-"
     assert column(r | {"Role": "reviewer"}) == "Review"
     assert column(r | {"State": "merged"}) is None
+    m = r | {"State": "merged", "Prod": "", "Merged": "2026-10-04", "Repo": "vidangel-backend"}
+    assert column(m) is None and column(m | {"Repo": "android"}) == "Merged"
+    assert column(m | {"Repo": "android", "QA": "x"}) == "QA" and not gaps(m | {"Repo": "android"})
+    t = m | {"State": "opened", "Merged": "", "QA": "x", "Prod": "x"}
+    assert column(t) == "Prod" and badge(t).startswith("●○○●●○ Prod")
     lines = ["    - [/] TECH-5311 thing\n", "        - 🔀 www!1 old\n", "        - note\n", "    - [/] TECH-9 other\n"]
     row = r | {"Repo": "www.vidangel.com", "MR": "945"}
     out = annotate_lines(lines, {"TECH-5311": [row]})
     assert out[1].startswith("        - 🔀 www!945 ") and out[2] == "        - note\n" and len(out) == 4
     assert annotate_lines(out, {"TECH-5311": [row]}) == out
+    notes = ["    - [/] TECH-1 a\n", "        - MR https://gitlab.com/v/www.vidangel.com/-/merge_requests/1\n",
+             "    - [/] NEW_F b\n", "        - MR https://gitlab.com/v/www.vidangel.com/-/merge_requests/2\n"]
+    global mutate
+    seen, real = {}, mutate
+    mutate = lambda fn: fn(seen) or seen
+    seen.update({"www.vidangel.com!1": {"TaskID": ""}, "www.vidangel.com!2": {"TaskID": ""}})
+    link_from_notes(notes)
+    mutate = real
+    assert seen["www.vidangel.com!1"]["TaskID"] == "TECH-1" and seen["www.vidangel.com!2"]["TaskID"] == ""
+    pr = os.path.join(tempfile.mkdtemp(), "t.md")
+    open(pr, "w").write("    - [/] TECH-2 a\n    - [!] TECH-3 b\n    - [x] TECH-4 c\n    - [h] TECH-2 dup\n")
+    assert task_priorities(pr) == {"TECH-2": (2, 0, "/"), "TECH-3": (0, 1, "!"), "TECH-4": (6, 2, "x")}
+    base = {f: "" for f in FIELDS} | {"Role": "author"}
+    g = {"a!1": base | {"Key": "a!1", "Repo": "a", "Branch": "feat/x", "Agent": "s1"},
+         "b!2": base | {"Key": "b!2", "Repo": "b", "Branch": "feat/x", "TaskID": "TECH-9"},
+         "b!3": base | {"Key": "b!3", "Repo": "b", "Branch": "other"},
+         "c!4": base | {"Key": "c!4", "Repo": "c", "Branch": "feat/x", "Role": "reviewer"}}
+    propagate(g)
+    assert g["a!1"]["TaskID"] == "TECH-9" and g["b!2"]["Agent"] == "s1"
+    assert g["b!3"]["Agent"] == "" and g["c!4"]["Agent"] == ""
+    assert [x["Key"] for x in for_agent(g.values(), "s1")] == ["a!1", "b!2"]
+    assert untasked(r | {"TaskID": ""}) and not untasked(r | {"TaskID": "", "Role": "reviewer"})
     print("ok")
 
 
 def main(argv):
-    cmd, args = (argv[0], argv[1:]) if argv else ("board", [])
-    if cmd == "board":
-        os.execvp("agent-dashboard", ["agent-dashboard", "--view", "board"])
+    cmd, args = (argv[0], argv[1:]) if argv else ("list", [])
+    if cmd == "list":
+        os.execvp("agent-dashboard", ["agent-dashboard", "--view", "mrs"])
     if cmd == "selftest":
         return selftest()
     if cmd == "sync":
         rows, failed = sync()
         print(f"{len(rows)} MRs tracked" + (f"; skipped: {', '.join(sorted(failed))}" if failed else ""))
     elif cmd == "add":
+        agent = args[args.index("--agent") + 1] if "--agent" in args[:-1] else ""
+        args = [a for a in args if a not in ("--agent", agent)]
         task = next((a for a in args if a.upper().startswith("TECH")), "")
         ref = next((a for a in args if a != task), None)
-        print(f"tracking {add(ref, task_of(task))}")
+        keys = [add(ref, task_of(task), agent)] if ref else add_here(task_of(task), agent)
+        print(f"tracking {', '.join(keys) or 'nothing — no MR for this branch'}")
+    elif cmd == "link":
+        if len(args) < 2:
+            sys.exit(__doc__)
+        hits = resolve(load(), args[0])
+        set_field([r["Key"] for r in hits], "Agent", args[1])
+        print(f"linked {len(hits)} MR(s) (+ related) to {args[1]}")
     elif cmd in ("set", "task"):
         if len(args) < 2:
             sys.exit(__doc__)
@@ -659,7 +699,7 @@ def main(argv):
     elif cmd == "ls":
         rows = list(load().values())
         if "--all" not in args:
-            rows = [r for r in rows if r["State"] == "opened" or (r["State"] == "merged" and not reached(r["Prod"]))]
+            rows = [r for r in rows if column(r)]
         if "--json" in args:
             print(json.dumps(rows, indent=1))
         else:

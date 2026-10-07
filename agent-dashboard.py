@@ -262,9 +262,10 @@ class Dashboard:
         self.sort_mode   = 'status'
         # pane_cache: {session: (lines, timestamp)}
         self.pane_cache  = {}
-        self.view        = 'agents'  # 'agents' | 'mrs' | 'board'
+        self.view        = 'agents'  # 'agents' | 'mrs'
         self.mrv         = MRView(self)
         self.mr_dots     = {}
+        self.mrs         = []
         self._init_curses()
 
     def _init_curses(self):
@@ -543,7 +544,6 @@ class Dashboard:
                 self._refresh_pinned(self._enrich())
 
             if self.view != 'agents':
-                self.mrv.mode = 'board' if self.view == 'board' else 'list'
                 self.mrv.draw()
                 try:
                     key = self.stdscr.getch()
@@ -552,7 +552,7 @@ class Dashboard:
                 if key == ord('Q'):
                     break
                 if key == ord('\t'):
-                    self.view = 'board' if self.view == 'mrs' else 'agents'
+                    self.view = 'agents'
                 elif key == curses.KEY_RESIZE:
                     self.stdscr.clear()
                 elif key != -1:
