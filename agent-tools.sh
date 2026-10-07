@@ -105,6 +105,7 @@ agent-type-register() {
 # Built-in types
 agent-type-register repo r "repo" ""  # repo has special handling, dir set by worktree
 agent-type-register general g "general" ""  # dir set by template
+agent-type-register multi m "multi-repo" "$REPO_DIR/{slug}"  # one worktree per repo inside
 
 # ── Load extensions (overwrites stubs, registers custom types) ───────────
 # Lookup order: $AGENT_TOOLS_EXT → $XDG_CONFIG_HOME/agent-tools/ext.sh
@@ -197,6 +198,15 @@ with open('$AGENT_FILE') as f:
             sys.exit(0)
 sys.exit(1)
 " "$1"
+}
+
+_agent_field() {
+    python3 -c "
+import csv, sys
+for row in csv.reader(open(sys.argv[1])):
+    if len(row) > int(sys.argv[3]) and row[3] == sys.argv[2]:
+        print(row[int(sys.argv[3])]); break
+" "$AGENT_FILE" "$1" "$2" 2>/dev/null
 }
 
 _agent_update_field() {
@@ -850,6 +860,7 @@ agent-done() {
     if command tmux has-session -t "$session_name" 2>/dev/null; then
         local pane_path=$(command tmux display-message -t "$session_name" -p '#{pane_current_path}' 2>/dev/null)
         [[ -n "$pane_path" && -f "$pane_path/.git" ]] && worktree_path="$pane_path"
+        [[ "$(_agent_field "$session_name" 6)" == multi ]] && worktree_path="$pane_path"
 
         printf "Kill tmux session? (y/n): "
         read -r kill_it
@@ -872,6 +883,13 @@ agent-done() {
 
 _remove_worktree() {
     local wt_path="$1"
+    if [[ -d "$wt_path" && ! -e "$wt_path/.git" ]]; then
+        # Multi-repo agent: the dir only holds worktrees, so it goes once they do.
+        local d
+        for d in "$wt_path"/*(N/); do _remove_worktree "$d"; done
+        rmdir "$wt_path" 2>/dev/null
+        return 0
+    fi
     [[ -z "$wt_path" || ! -f "$wt_path/.git" ]] && return 1
     local main_repo=$(cd "$wt_path" && git rev-parse --git-common-dir 2>/dev/null | sed 's|/\.git$||')
     if [[ -n "$main_repo" ]]; then
@@ -1099,6 +1117,7 @@ with open('$AGENT_FILE') as f:
 
     local cdir=""
     [[ "$type_label" == repo:* && "$work_dir" != "$REPO_DIR/${type_label#repo:}" ]] && cdir="$work_dir"
+    [[ "$type_label" == multi ]] && cdir="$work_dir"
     command tmux new-session -d -s "$sess" -c "$work_dir"
     local launch_cmd=$(_agent_tool_cmd "$tool" "$prompt_file" "$sess" "$cdir")
     command tmux send-keys -t "$sess" "$launch_cmd" Enter

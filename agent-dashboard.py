@@ -184,8 +184,17 @@ def get_pane_path(session):
         return ""
 
 
-def remove_worktree(path):
+def remove_worktree(path, multi=False):
     """Remove a git worktree directory, falling back to rm -rf."""
+    if multi and path and os.path.isdir(path) and not os.path.exists(os.path.join(path, ".git")):
+        # A multi-repo agent's dir only holds worktrees, so it goes once they do.
+        for d in os.listdir(path):
+            remove_worktree(os.path.join(path, d))
+        try:
+            os.rmdir(path)
+        except OSError:
+            pass
+        return
     if not path or not os.path.isfile(os.path.join(path, ".git")):
         return
     try:
@@ -708,7 +717,7 @@ class Dashboard:
                         subprocess.run(["tmux", "kill-session", "-t", session],
                                        stderr=subprocess.DEVNULL)
                         self._status(f"Killing '{session}'…  removing worktree")
-                        remove_worktree(pane_path)
+                        remove_worktree(pane_path, agent.get('Type') == 'multi')
                         self._status(f"Killing '{session}'…  updating tracker")
                         remove_agent(session)
                         self._flash(f"Killed '{session}'")
