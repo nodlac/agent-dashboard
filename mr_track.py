@@ -36,13 +36,15 @@ TARDIS_REPOS = {"vidangel-backend", "www.vidangel.com", "pier"}
 BUILD_JOBS = {"android": re.compile(r"^deploy_")}
 STAGING_ENV, PROD_ENV = "staging", "production"
 
-STAGES = ["Created", "SelfQA", "QA", "Staging", "Prod", "Merged"]
+STAGES = ["Created", "SelfQA", "Staging", "Merged", "QA", "Prod"]
+# Tardis repos deploy the branch, QA it on prod, then merge; build repos merge first and QA the build.
+TARDIS_ORDER = ["Created", "SelfQA", "Staging", "QA", "Prod", "Merged"]
 LABELS = {"Created": "Created", "SelfQA": "Self-QA", "QA": "QA",
           "Staging": "Staging", "Prod": "Prod", "Merged": "Merged"}
 GATES = ("SelfQA", "QA")  # human checks worth flagging when skipped
 FIELDS = ["Key", "TaskID", "Repo", "ProjectID", "MR", "Role", "State", "Branch", "Title",
           "HeadSHA", "MergeSHA", "Target", "MergeStatus", "URL", *STAGES, "StageNote",
-          "Updated", "Notes"]
+          "Updated", "Activity", "Agent", "Notes"]
 ROLE_RANK = {"author": 0, "assignee": 1, "reviewer": 2}
 TECH_RE = re.compile(r"tech[-_ ]?(\d{3,})", re.I)
 MR_URL_RE = re.compile(r"gitlab\.com/([\w.\-/]+?)/-/merge_requests/(\d+)")
@@ -68,37 +70,55 @@ def toggle(row, stage):
     row[stage] = "-" if reached(row.get(stage)) else f"{date.today()}*"
 
 
+def order(row):
+    return TARDIS_ORDER if row.get("Repo") in TARDIS_REPOS else STAGES
+
+
 def current(row):
-    """Index of the furthest stage reached, -1 if none."""
-    return max((i for i, s in enumerate(STAGES) if reached(row.get(s))), default=-1)
+    """Index into order(row) of the furthest stage reached, -1 if none."""
+    return max((i for i, s in enumerate(order(row)) if reached(row.get(s))), default=-1)
+
+
+def at(row):
+    """Furthest stage reached, None if none."""
+    cur = current(row)
+    return order(row)[cur] if cur >= 0 else None
 
 
 def gaps(row):
     if row.get("State") != "opened":
         return []
     cur = current(row)
-    return [LABELS[s] for s in GATES if STAGES.index(s) < cur and not reached(row.get(s))]
+    return [LABELS[s] for s in GATES if order(row).index(s) < cur and not reached(row.get(s))]
 
 
 def column(row):
     """Board column, or None when the MR is off the board."""
-    if row.get("State") in ("merged", "closed"):
+    st = row.get("State")
+    if st == "closed" or st == "merged" and (row.get("Role") != "author" or reached(row.get(order(row)[-1]))):
         return None
     if row.get("Role") != "author":
         return "Review"
-    cur = current(row)
-    return LABELS[STAGES[max(cur, 0)]] if cur < STAGES.index("Merged") else None
+    return LABELS[at(row) or "Created"]
 
 
 def badge(row):
-    dots = "".join("●" if reached(row.get(s)) else "○" for s in STAGES)
-    cur = current(row)
-    label = LABELS[STAGES[cur]] if cur >= 0 else "—"
+    dots = "".join("●" if reached(row.get(s)) else "○" for s in order(row))
+    label = LABELS[at(row)] if at(row) else "—"
     if row.get("State") == "closed":
         label = "closed"
-    note = f" {row['StageNote']}" if row.get("StageNote") and STAGES[cur] == "Staging" else ""
+    note = f" {row['StageNote']}" if row.get("StageNote") and at(row) == "Staging" else ""
     warn = "".join(f" ⚠{g}" for g in gaps(row))
     return f"{dots} {label}{note}{warn}"
+
+
+def ago(stamp):
+    """GitLab UTC stamp '2026-10-05T14:02' → '3h' / '4d'."""
+    try:
+        secs = (datetime.now(timezone.utc) - datetime.fromisoformat(stamp).replace(tzinfo=timezone.utc)).total_seconds()
+    except ValueError:
+        return ""
+    return f"{int(secs // 86400)}d" if secs >= 86400 else f"{int(secs // 3600)}h"
 
 
 def short_repo(repo):
@@ -332,7 +352,7 @@ def sync(only=None):
         for r in rows.values():
             b = r.pop("_before", None)
             if b is not None and current(r) > max(b, 0):  # first sighting isn't news
-                transitions.append(f"{ident(r)} → {LABELS[STAGES[current(r)]]}")
+                transitions.append(f"{ident(r)} → {LABELS[at(r)]}")
 
     rows = mutate(apply)
     for t in transitions:

@@ -167,13 +167,15 @@ class MRView:
         self.d._write(y, 0, ("─── " + (r["Key"] if r else "") + " " + "─" * w)[:w], curses.color_pair(C_HEAD))
         if not r:
             return
-        cells = "  ".join(f"{mt.LABELS[s]}:{r[s] or '·'}" for s in mt.STAGES)
+        cells = "  ".join(f"{mt.LABELS[s]}:{r[s] or '·'}" for s in mt.order(r))
         info = [
             r["Title"],
             f"{r['Branch']} → {r['Target']}   {r['Role']}   {r['State']}   merge:{r['MergeStatus'] or '·'}",
             cells + ("   (* = by hand, - = cleared)" if any("*" in r[s] or r[s] == "-" for s in mt.STAGES) else ""),
             r["URL"],
             f"note: {r['Notes']}" if r["Notes"] else "",
+            "⇄ " + "   ".join(f"{mt.short_repo(x['Repo'])}!{x['MR']} {mt.badge(x)}" for x in mt.group(self.rows.values(), r)[1:])
+            + (f"   agent: {r['Agent']}" if r["Agent"] else "") if len(mt.group(self.rows.values(), r)) > 1 or r["Agent"] else "",
         ]
         for i, text in enumerate(info):
             self.d._write(y + 1 + i, 1, text[:w - 2], curses.color_pair(C_CARD))
