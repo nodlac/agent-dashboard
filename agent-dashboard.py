@@ -798,7 +798,9 @@ class Dashboard:
                 self._refresh_pinned(enriched)
 
             elif key == ord('s'):
-                if agent:
+                if agent and not agent['Session']:
+                    self._flash("row has no session — start one from the MR view (Enter)")
+                elif agent:
                     session = agent['Session']
                     script = os.environ.get("AGENT_TOOLS_SCRIPT", os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent-tools.sh"))
                     # Session gone → rebuild it; session alive but CLI exited → relaunch in place.
